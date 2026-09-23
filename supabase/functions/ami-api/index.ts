@@ -38,16 +38,21 @@ function publicUser(user: Record<string, unknown>) {
 }
 
 async function getSession(token: string, column = 'Token') {
-  const { data, error } = await supabase
+  const { data: sessionData, error: sessionError } = await supabase
     .from('SESSIONS')
-    .select('*, USERS(*)')
+    .select('*')
     .eq(column, token)
     .maybeSingle();
-  const user = data?.USERS as Record<string, unknown> | undefined;
-  if (error || !data || !user || String(user.Active).toLowerCase() !== 'true' || Date.parse(String(data.ExpiresAt)) <= Date.now()) {
+  if (sessionError || !sessionData || Date.parse(String(sessionData.ExpiresAt)) <= Date.now()) {
     return null;
   }
-  return { session: data, user };
+  const { data: user, error: userError } = await supabase
+    .from('USERS')
+    .select('*')
+    .eq('UserID', sessionData.UserID)
+    .maybeSingle();
+  if (userError || !user || String(user.Active).toLowerCase() !== 'true') return null;
+  return { session: sessionData, user: user as Record<string, unknown> };
 }
 
 Deno.serve(async request => {
@@ -92,6 +97,20 @@ Deno.serve(async request => {
     if (rpcMatch[1] === 'createResumeKey') return response({ ok: true, resumeKey: session.session.ResumeKey });
     if (rpcMatch[1] === 'logout') {
       await supabase.from('SESSIONS').delete().eq('Token', session.session.Token);
+      return response({ ok: true });
+    }
+    if (rpcMatch[1] === 'changePassword') {
+      const oldPassword = String(args[1] || '');
+      const newPassword = String(args[2] || '');
+      if (await hashPassword(oldPassword, String(session.user.Salt)) !== session.user.PasswordHash) {
+        return response({ error: 'Password lama tidak benar.' }, 400);
+      }
+      if (newPassword.length < 8) return response({ error: 'Password baru minimal 8 karakter.' }, 400);
+      const salt = [...crypto.getRandomValues(new Uint8Array(24))].map(value => value.toString(16).padStart(2, '0')).join('');
+      const passwordHash = await hashPassword(newPassword, salt);
+      const { error } = await supabase.from('USERS').update({ Salt: salt, PasswordHash: passwordHash, ForceChangePassword: 'false', UpdatedAt: new Date().toISOString() }).eq('UserID', session.user.UserID);
+      if (error) return response({ error: error.message }, 503);
+      await supabase.from('SESSIONS').delete().eq('UserID', session.user.UserID).neq('Token', session.session.Token);
       return response({ ok: true });
     }
     return response({ error: `Fitur ${rpcMatch[1]} belum dimigrasikan ke Supabase Edge Function.` }, 501);
