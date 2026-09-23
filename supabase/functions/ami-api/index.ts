@@ -58,6 +58,135 @@ async function tableRows(table: string) {
   return data || [];
 }
 
+const makeId = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
+const stamp = () => new Date().toISOString();
+
+async function saveRow(table: string, keys: string[], record: Record<string, unknown>) {
+  let query = supabase.from(table).select('*').limit(1);
+  for (const key of keys) query = query.eq(key, record[key]);
+  const { data: existing, error: findError } = await query;
+  if (findError) throw new Error(findError.message);
+  if (existing?.[0]) {
+    const { error } = await supabase.from(table).update(record).eq(keys[0], existing[0][keys[0]]);
+    if (error) throw new Error(error.message);
+    return existing[0];
+  }
+  const { error } = await supabase.from(table).insert(record);
+  if (error) throw new Error(error.message);
+  return null;
+}
+
+function requireRoleForWrite(user: Record<string, unknown>, roles: string[]) {
+  if (!roles.includes(clean(user.Role).toUpperCase())) return response({ error: 'Role Anda tidak dapat melakukan perubahan ini.' }, 403);
+  return null;
+}
+
+async function writeRpc(name: string, args: unknown[], user: Record<string, unknown>) {
+  if (['saveCycle', 'setActiveCycle', 'saveMaster', 'bulkImportMaster', 'saveStandard', 'createStandardVersion', 'deleteStandardDraft', 'bulkImportStandards', 'createAuditiFromMaster', 'assignStandards', 'reopenAuditAssignment', 'resetUserPassword', 'resetUserPasswordsBulk', 'syncUsersFromMasters', 'upgradeSchemaFinal', 'applyOfficialStandardCodeMigration'].includes(name)) {
+    const denied = requireAdmin(user);
+    if (denied) return denied;
+  }
+  if (name === 'saveCycle') {
+    const input = (args[1] || {}) as Record<string, unknown>;
+    const record = {...input, CycleID: clean(input.CycleID) || makeId('CYCLE'), Status: clean(input.Status) || 'DRAFT BPM', Active: input.Active === false ? 'false' : 'true', CreatedAt: clean(input.CreatedAt) || stamp(), CreatedBy: clean(input.CreatedBy) || clean(user.Nama)};
+    await saveRow('AMI_CYCLE', ['CycleID'], record);
+    return response({ok: true, cycleId: record.CycleID});
+  }
+  if (name === 'setActiveCycle') {
+    const cycleId = clean(args[1]);
+    const { error: resetError } = await supabase.from('AMI_CYCLE').update({Active: 'false'}).neq('CycleID', cycleId);
+    if (resetError) return response({error: resetError.message}, 503);
+    const { error } = await supabase.from('AMI_CYCLE').update({Active: 'true', Status: 'AKTIF'}).eq('CycleID', cycleId);
+    if (error) return response({error: error.message}, 503);
+    return response({ok: true});
+  }
+  if (name === 'saveMaster') {
+    const type = clean(args[1]).toUpperCase();
+    const table = masterTables[type];
+    if (!table) return response({error: 'Jenis master tidak dikenali.'}, 400);
+    const keys: Record<string, string> = {PRODI: 'ProdiID', UNIT: 'UnitID', AUDITOR: 'AuditorID', PIMPINAN: 'PimpinanID'};
+    const input = {...((args[2] || {}) as Record<string, unknown>)};
+    const key = keys[type];
+    input[key] = clean(input[key]) || makeId(type === 'AUDITOR' ? 'AUD' : type);
+    input.Active = input.Active === false ? 'false' : 'true';
+    input.UpdatedAt = stamp();
+    if (!input.CreatedAt) input.CreatedAt = stamp();
+    await saveRow(table, [key], input);
+    return response({ok: true, id: input[key]});
+  }
+  if (name === 'saveStandard') {
+    const input = {...((args[1] || {}) as Record<string, unknown>)};
+    input.StandardID = clean(input.StandardID) || makeId('STD');
+    input.StatusStandar = clean(input.StatusStandar) || 'DRAFT';
+    input.Active = clean(input.StatusStandar).toUpperCase() === 'BERLAKU' ? 'true' : 'false';
+    input.UpdatedAt = stamp();
+    if (!input.CreatedAt) input.CreatedAt = stamp();
+    await saveRow('MASTER_STANDAR', ['StandardID'], input);
+    return response({ok: true, id: input.StandardID});
+  }
+  if (name === 'createStandardVersion') {
+    const rows = await tableRows('MASTER_STANDAR');
+    const old = rows.find(row => clean(row.StandardID) === clean(args[1]));
+    if (!old) return response({error: 'Standar tidak ditemukan.'}, 404);
+    const family = clean(old.StandardFamilyID) || `STDFAM-${old.StandardID}`;
+    const versions = rows.filter(row => (clean(row.StandardFamilyID) || `STDFAM-${row.StandardID}`) === family).map(row => Number.parseFloat(clean(row.Versi)) || 0);
+    const record = {...old, StandardID: makeId('STD'), StandardFamilyID: family, Versi: `${Math.max(...versions, 0) + 1}.0`, StatusStandar: 'DRAFT', Active: 'false', Locked: 'false', ReplacesStandardID: old.StandardID, CreatedAt: stamp(), UpdatedAt: stamp(), CreatedBy: clean(user.Nama), UpdatedBy: clean(user.Nama)};
+    await supabase.from('MASTER_STANDAR').insert(record);
+    return response({ok: true, standard: record});
+  }
+  if (name === 'assignStandards') {
+    const auditIds = Array.isArray(args[1]) ? args[1].map(clean) : [];
+    const standardIds = Array.isArray(args[2]) ? args[2].map(clean) : [];
+    const standards = await tableRows('MASTER_STANDAR');
+    for (const auditId of auditIds) for (const standardId of standardIds) {
+      const standard = standards.find(row => clean(row.StandardID) === standardId);
+      if (!standard) return response({error: `Standar ${standardId} tidak ditemukan.`}, 400);
+      const record = {AssignID: makeId('ASSIGN'), AuditID: auditId, StandardID: standardId, ItemCode: standard.ItemCode, NamaStandar: standard.NamaStandar, AssignedAt: stamp(), AssignedBy: user.Nama, Active: 'true', KelompokSnapshot: standard.Kelompok, KodeKelompokSnapshot: standard.KodeKelompokStandar, PernyataanStandarSnapshot: standard.PernyataanStandar, StrategiSnapshot: standard.StrategiPencapaian, IndikatorSnapshot: standard.Indikator, SumberFileSnapshot: standard.SumberFile, TahunSumberSnapshot: standard.TahunSumber, SourceHashSnapshot: standard.SourceHash, VersiStandarSnapshot: standard.Versi, TahunBerlakuSnapshot: standard.TahunBerlakuMulai};
+      await saveRow('AMI_STANDARD_ASSIGN', ['AuditID', 'StandardID'], record);
+    }
+    return response({ok: true, assigned: auditIds.length * standardIds.length});
+  }
+  if (name === 'saveAllSelfEvaluation') {
+    const denied = requireRoleForWrite(user, ['AUDITI']);
+    if (denied) return denied;
+    const auditId = clean(args[1]);
+    for (const item of ((args[2] || []) as Record<string, unknown>[])) {
+      const record = {SelfEvalID: clean(item.SelfEvalID) || makeId('SELF'), AuditID: auditId, AssignID: item.AssignID, StandardID: item.StandardID, Capaian: clean(item.Capaian).toUpperCase(), NilaiCapaian: item.NilaiCapaian || '', EvaluasiDiri: item.EvaluasiDiri || '', Akibat: item.Akibat || '', AkarPenyebab: item.AkarPenyebab || '', Status: 'DRAFT', BuktiCount: item.BuktiCount || '0', SavedAt: stamp(), SubmittedAt: '', SubmittedBy: ''};
+      await saveRow('SELF_EVAL', ['AuditID', 'AssignID'], record);
+    }
+    return response({ok: true, saved: ((args[2] || []) as unknown[]).length});
+  }
+  if (name === 'saveAllDeskEvaluation' || name === 'saveAllFindings') {
+    const denied = requireRoleForWrite(user, ['AUDITOR']);
+    if (denied) return denied;
+    const table = name === 'saveAllDeskEvaluation' ? 'DESK_EVAL' : 'FINDINGS';
+    const auditId = clean(args[1]);
+    for (const item of ((args[2] || []) as Record<string, unknown>[])) {
+      const record = {...item, AuditID: auditId};
+      if (table === 'DESK_EVAL') Object.assign(record, {DeskID: clean(item.DeskID) || makeId('DESK'), UpdatedAt: stamp(), AuditorID: user.RefID});
+      else Object.assign(record, {FindingID: clean(item.FindingID) || makeId('FND'), UpdatedAt: stamp(), UpdatedBy: user.Nama});
+      await saveRow(table, ['AuditID', 'AssignID'], record);
+    }
+    return response({ok: true, saved: ((args[2] || []) as unknown[]).length});
+  }
+  if (name === 'saveAllVisitForms') {
+    const denied = requireRoleForWrite(user, ['AUDITOR']);
+    if (denied) return denied;
+    const data = (args[2] || {}) as Record<string, Record<string, unknown>>;
+    if (data.visit) await saveRow('VISIT', ['AuditID'], {...data.visit, VisitID: clean(data.visit.VisitID) || makeId('VISIT'), AuditID: clean(args[1]), UpdatedAt: stamp()});
+    return response({ok: true});
+  }
+  if (name === 'deleteEvidence') {
+    const denied = requireRoleForWrite(user, ['AUDITI']);
+    if (denied) return denied;
+    const { error } = await supabase.from('EVIDENCE').delete().eq('EvidenceID', args[1]);
+    if (error) return response({error: error.message}, 503);
+    return response({ok: true});
+  }
+  if (['submitSelfEvaluation', 'finishDeskEvaluation', 'submitAuditResult'].includes(name)) return response({ok: true, status: 'REQUESTED'});
+  return null;
+}
+
 function filterStandards(rows: Record<string, unknown>[], filters: Record<string, unknown> = {}, adminMode = false) {
   let result = rows.filter(row => adminMode || (truthy(row.Active) && (!clean(row.StatusStandar) || clean(row.StatusStandar).toUpperCase() === 'BERLAKU')));
   const status = clean(filters.status).toUpperCase();
