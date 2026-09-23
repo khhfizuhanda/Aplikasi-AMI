@@ -10,11 +10,13 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 const schema = process.env.PGSCHEMA || 'ami';
 const pool = new Pool({
+  ...(process.env.DATABASE_URL ? { connectionString: process.env.DATABASE_URL } : {}),
   host: process.env.PGHOST || '127.0.0.1',
   port: Number(process.env.PGPORT || 5432),
   database: process.env.PGDATABASE || 'ami_local',
   user: process.env.PGUSER || 'postgres',
   password: process.env.PGPASSWORD,
+  ...(process.env.PGSSL === 'true' ? { ssl: { rejectUnauthorized: false } } : {}),
   connectionTimeoutMillis: 5000,
   query_timeout: 15000,
 });
@@ -269,7 +271,7 @@ app.use('/api', (req, res) => res.status(404).json({error:'Endpoint API tidak di
 app.use((error, req, res, next) => res.status(error.status || 500).json({error:error.message}));
 
 if (require.main === module) {
-  app.listen(port, '127.0.0.1', () => console.log(`AMI local server running at http://localhost:${port}/?view=login`));
+  app.listen(port, process.env.HOST || '0.0.0.0', () => console.log(`AMI server running on port ${port}`));
   ensureLocalAdmin().catch(error => console.error(`Database belum siap: ${databaseError(error)}`));
 }
 module.exports = { app, pool, ensureLocalAdmin };

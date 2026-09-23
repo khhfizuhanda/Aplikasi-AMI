@@ -93,3 +93,13 @@ CATATAN PERFORMANCE
 - Upload bukti dan operasi Drive berat dilakukan sejauh mungkin di luar global lock.
 - Workspace menggunakan snapshot standar dan hanya membaca seluruh MASTER_STANDAR bila diperlukan.
 - Dashboard publik memakai cache singkat agar pembukaan serentak tidak membebani server berulang.
+
+DEPLOY NODE.JS KE RENDER
+1. Buka Render dan pilih New > Blueprint.
+2. Hubungkan repository GitHub `khhfizuhanda/Aplikasi-AMI`.
+3. Pilih branch `main`; Render akan membaca `render.yaml`.
+4. Konfirmasi pembuatan web service `aplikasi-ami` dan database `ami-postgres`.
+5. Tunggu build dan deploy selesai. Schema PostgreSQL dijalankan otomatis sebelum server dimulai.
+6. Buka URL service Render, misalnya `https://aplikasi-ami.onrender.com/?view=login`.
+
+Health check tersedia di `/api/health`. Pada paket Render, `DATABASE_URL` disediakan otomatis oleh database Render.
