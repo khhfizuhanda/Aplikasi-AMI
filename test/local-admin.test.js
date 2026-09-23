@@ -75,3 +75,18 @@ test('standard content is locked after assignment and password reset excludes bu
   assert.equal(pool.data.USERS.find(row => row.UserID === 'admin').ForceChangePassword, undefined);
   assert.equal(pool.data.USERS.find(row => row.UserID === 'u1').ForceChangePassword, 'true');
 });
+
+test('bulk master import rejects invalid types and reports the source row', async () => {
+  const pool = fakePool(base);
+  const result = await admin.bulkImportMaster(pool, 'ami', adminUser, 'UNIT', [
+    'KodeUnit\tNamaUnit\tJenisUnit\tPimpinan',
+    'U1\tUnit Valid\tBIRO\tPimpinan',
+    'U2\tUnit Salah\tINVALID\tPimpinan',
+    'U1\tUnit Valid\tBIRO\tPimpinan'
+  ].join('\n'));
+  assert.equal(result.inserted, 1);
+  assert.equal(result.skipped, 2);
+  assert.match(result.errors[0], /Baris 3/);
+  assert.match(result.errors[0], /JenisUnit/);
+  assert.match(result.errors[1], /Baris 4/);
+});

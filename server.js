@@ -9,6 +9,24 @@ if (fs.existsSync(path.join(__dirname, '.env'))) process.loadEnvFile(path.join(_
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const schema = process.env.PGSCHEMA || 'ami';
+const bpmLogoSvg = 'data:image/svg+xml;utf8,' + encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 120" role="img" aria-label="Bureau of Quality Assurance BPM UMA">
+  <defs>
+    <linearGradient id="bpmBg" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0%" stop-color="#eaf4ff"/>
+      <stop offset="100%" stop-color="#dfeeff"/>
+    </linearGradient>
+  </defs>
+  <rect width="260" height="120" rx="22" fill="url(#bpmBg)"/>
+  <rect x="16" y="16" width="88" height="88" rx="20" fill="#123b68"/>
+  <text x="60" y="71" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="46" font-weight="900" fill="#ffffff">BPM</text>
+  <g fill="#0f3d69" font-family="Arial, Helvetica, sans-serif">
+    <text x="120" y="46" font-size="18" font-weight="700">Biro Penjaminan Mutu</text>
+    <text x="120" y="70" font-size="18" font-weight="700">Universitas Medan Area</text>
+    <text x="120" y="92" font-size="12" letter-spacing="1.2" fill="#456789">QUALITY ASSURANCE</text>
+  </g>
+</svg>
+`);
 const allowedOrigins = new Set((process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000,https://khhfizuhanda.github.io').split(',').map(origin => origin.trim()).filter(Boolean));
 const pool = new Pool({
   ...(process.env.DATABASE_URL ? { connectionString: process.env.DATABASE_URL } : {}),
@@ -72,8 +90,8 @@ app.get(['/', '/Index.html', '/index.html'], (req, res) => {
     .replaceAll('<?= orgName ?>', 'Universitas Medan Area')
     .replaceAll('<?= unitName ?>', 'Biro Penjaminan Mutu')
     .replaceAll('<?= appVersion ?>', '1.6.2-local')
-    .replaceAll('<?!= bpmLogo ?>', '')
-    .replaceAll('<?!= spmiLogo ?>', '')
+    .replaceAll('<?!= bpmLogo ?>', bpmLogoSvg)
+    .replaceAll('<?!= spmiLogo ?>', bpmLogoSvg)
     .replaceAll('<?!= campusHero ?>', '')
     .replace("<?!= JSON.stringify(webAppUrl || '') ?>", JSON.stringify('/'))
     .replace("<?= initialView === 'login' ? 'hidden' : '' ?>", initialView === 'login' ? 'hidden' : '')
@@ -109,7 +127,7 @@ app.post('/api/auth/login', async (req, res) => {
     const token = crypto.randomBytes(32).toString('hex');
     const resumeKey = crypto.randomBytes(32).toString('hex');
     await pool.query(`INSERT INTO ${tableName('SESSIONS')} ("Token", "UserID", "ExpiresAt", "CreatedAt", "LastSeenAt", "ResumeKey") VALUES ($1,$2,$3,$4,$4,$5)`,
-      [token, user.UserID, new Date(Date.now() + 12 * 3600000).toISOString(), new Date().toISOString(), resumeKey]);
+      [token, user.UserID, null, new Date().toISOString(), resumeKey]);
     res.json({ ok: true, token, resumeKey, user: publicUser(user) });
   } catch (error) {
     res.status(503).json({ ok: false, error: databaseError(error) });
@@ -153,7 +171,8 @@ function publicUser(user) {
 async function session(token, column = 'Token') {
   const result = await pool.query(`SELECT u.*, s."Token", s."ResumeKey", s."ExpiresAt" FROM ${tableName('SESSIONS')} s JOIN ${tableName('USERS')} u ON u."UserID" = s."UserID" WHERE s.${quoteIdentifier(column)} = $1 LIMIT 1`, [String(token || '')]);
   const user = result.rows[0];
-  if (!user || String(user.Active).toLowerCase() !== 'true' || !(Date.parse(user.ExpiresAt) > Date.now())) {
+  const expiresAt = user && user.ExpiresAt != null && user.ExpiresAt !== '' ? Date.parse(user.ExpiresAt) : null;
+  if (!user || String(user.Active).toLowerCase() !== 'true' || (expiresAt !== null && expiresAt <= Date.now())) {
     const error = new Error('Sesi sudah berakhir. Silakan login kembali.'); error.status = 401; throw error;
   }
   return user;

@@ -1,451 +1,243 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
+import {createHash, randomBytes, timingSafeEqual} from 'node:crypto';
+import {pool,ensureRuntimeSchema,transaction} from './database.mjs';
+import {dispatch} from './rpc.mjs';
 
-const supabase = createClient(
-  Deno.env.get('SUPABASE_URL') ?? 'https://iabubetffbzsjestjqxp.supabase.co',
-  Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
-  { db: { schema: 'ami' } },
-);
-
-const corsHeaders = {
-  'Access-Control-Allow-Origin': 'https://khhfizuhanda.github.io',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+const corsHeaders={
+  'Access-Control-Allow-Origin':'https://khhfizuhanda.github.io',
+  'Access-Control-Allow-Headers':'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods':'GET, POST, OPTIONS',
 };
-
-function response(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-  });
+function response(body:unknown,status=200){return new Response(JSON.stringify(body),{status,headers:{...corsHeaders,'Content-Type':'application/json'}});}
+const hashPassword=(password:string,salt:string)=>createHash('sha256').update(`${salt}|${password}`).digest('hex');
+function validPassword(password:string,user:Record<string,string>){
+  const expected=user.PasswordHash||'',actual=hashPassword(password,user.Salt||'');
+  return expected.length===actual.length && timingSafeEqual(new TextEncoder().encode(expected),new TextEncoder().encode(actual));
 }
-
-async function hashPassword(password: string, salt: string) {
-  const data = new TextEncoder().encode(`${salt}|${password}`);
-  const digest = await crypto.subtle.digest('SHA-256', data);
-  return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('');
+const publicUser=(u:Record<string,string>)=>({userId:u.UserID,username:u.Username,nama:u.Nama,role:u.Role,refType:u.RefType||'',refId:u.RefID||'',forceChangePassword:String(u.ForceChangePassword).toLowerCase()==='true'});
+async function getSession(token:unknown,resume=false){
+  if(typeof token!=='string'||!token)return null;
+  const column=resume?'ResumeKey':'Token';
+  const rows=(await pool.query(`SELECT u.*,s."Token",s."ResumeKey",s."ExpiresAt" FROM ami."SESSIONS" s JOIN ami."USERS" u ON u."UserID"=s."UserID" WHERE s."${column}"=$1 LIMIT 1`,[token])).rows;
+  const user=rows[0];
+  if(!user || String(user.Active).toLowerCase()!=='true')return null;
+  const expiresAt = user.ExpiresAt == null || user.ExpiresAt === '' ? null : Date.parse(String(user.ExpiresAt));
+  if(expiresAt !== null && expiresAt <= Date.now())return null;
+  return user;
 }
-
-function publicUser(user: Record<string, unknown>) {
-  return {
-    userId: user.UserID,
-    username: user.Username,
-    nama: user.Nama,
-    role: user.Role,
-    refType: user.RefType || '',
-    refId: user.RefID || '',
-    forceChangePassword: String(user.ForceChangePassword).toLowerCase() === 'true',
-  };
+function compatResponse(payload:unknown,status=200){
+  return new Response(JSON.stringify(payload),{status,headers:{'Content-Type':'application/json'}});
 }
-
-const masterTables: Record<string, string> = {
-  PRODI: 'MASTER_PRODI',
-  UNIT: 'MASTER_UNIT',
-  AUDITOR: 'MASTER_AUDITOR',
-  PIMPINAN: 'MASTER_PIMPINAN',
-};
-
-const masterTypeAliases: Record<string, string> = {
-  PRODI: 'PRODI', MASTER_PRODI: 'PRODI',
-  UNIT: 'UNIT', MASTER_UNIT: 'UNIT',
-  AUDITOR: 'AUDITOR', MASTER_AUDITOR: 'AUDITOR',
-  PIMPINAN: 'PIMPINAN', MASTER_PIMPINAN: 'PIMPINAN',
-};
-
-const importModules: Record<string, {label: string; context: string; admin?: boolean; exportOnly?: boolean; table?: string}> = {
-  MASTER_PRODI: {label: 'Master Prodi', context: 'NONE', admin: true, table: 'MASTER_PRODI'},
-  MASTER_UNIT: {label: 'Master Unit/Biro', context: 'NONE', admin: true, table: 'MASTER_UNIT'},
-  MASTER_AUDITOR: {label: 'Master Auditor', context: 'NONE', admin: true, table: 'MASTER_AUDITOR'},
-  MASTER_PIMPINAN: {label: 'Master Pimpinan', context: 'NONE', admin: true, table: 'MASTER_PIMPINAN'},
-  MASTER_STANDAR: {label: 'Master Standar', context: 'NONE', admin: true, table: 'MASTER_STANDAR'},
-  SIKLUS: {label: 'Siklus AMI', context: 'NONE', admin: true, table: 'AMI_CYCLE'},
-  AUDIT_LOG: {label: 'Audit Log', context: 'NONE', admin: true, exportOnly: true, table: 'AUDIT_LOG'},
-  ERROR_LOG: {label: 'Error Log', context: 'NONE', admin: true, exportOnly: true, table: 'SYSTEM_ERROR_LOG'},
-};
-
-const clean = (value: unknown) => String(value ?? '').trim();
-const truthy = (value: unknown) => value === true || ['true', '1', 'yes'].includes(clean(value).toLowerCase());
-
-function requireAdmin(user: Record<string, unknown>) {
-  if (user.Role !== 'ADMIN_BPM') return response({ error: 'Hanya Admin BPM yang dapat mengakses data ini.' }, 403);
-  return null;
-}
-
-async function tableRows(table: string) {
-  const { data, error } = await supabase.from(table).select('*');
-  if (error) throw new Error(error.message);
+const clean = (value:any) => String(value == null ? '' : value).trim();
+const truthy = (value:any) => value === true || ['true','1','yes'].includes(clean(value).toLowerCase());
+const same = (left:any,right:any) => clean(left) === clean(right);
+const tableRows = async (tableName:string) => {
+  if (typeof supabase === 'undefined' || !supabase || typeof supabase.from !== 'function') return [];
+  const {data=[]} = await supabase.from(tableName).select();
   return data || [];
+};
+function auditInScope(user:any,audit:any,teamRows:any[],pimpRows:any[]) {
+  if (!user || !audit) return false;
+  if (user.Role === 'ADMIN_BPM') return true;
+  if (!clean(user.RefID)) return false;
+  if (user.Role === 'AUDITI') return same(audit.AuditiType, user.RefType) && same(audit.AuditiID, user.RefID);
+  if (user.Role === 'AUDITOR') {
+    const team = teamRows.find((row:any) => same(row.AuditID, audit.AuditID));
+    return !!team && [team.LeadAuditorID, team.Member1ID, team.Member2ID].some((id:any) => same(id, user.RefID));
+  }
+  if (user.Role === 'PIMPINAN') {
+    const profile = pimpRows.find((row:any) => truthy(row.Active) && same(row.PimpinanID, user.RefID));
+    if (!profile) return false;
+    const level = clean(profile.Level).toUpperCase().replace(/\s+/g,'_').replace(/\//g,'_');
+    const accessId = clean(profile.AccessID) || (level === 'UNIT' ? clean(profile.UnitID) : '');
+    const accessName = clean(profile.AccessName);
+    if (['YAYASAN','UNIVERSITAS'].includes(level)) return true;
+    if (!accessId && !accessName) return false;
+    if (level === 'FAKULTAS') return clean(audit.Fakultas).toLowerCase() === clean(accessName || accessId).toLowerCase();
+    return same(profile.AccessType || level, audit.AuditiType) && same(accessId, audit.AuditiID);
+  }
+  return false;
 }
-
-const makeId = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
-const stamp = () => new Date().toISOString();
-
-async function saveRow(table: string, keys: string[], record: Record<string, unknown>) {
-  let query = supabase.from(table).select('*').limit(1);
-  for (const key of keys) query = query.eq(key, record[key]);
-  const { data: existing, error: findError } = await query;
-  if (findError) throw new Error(findError.message);
-  if (existing?.[0]) {
-    const { error } = await supabase.from(table).update(record).eq(keys[0], existing[0][keys[0]]);
-    if (error) throw new Error(error.message);
-    return existing[0];
+async function compatReadRpc(name:string,args:any[] = [], user:any = null) {
+  if (typeof supabase === 'undefined' || !supabase || typeof supabase.from !== 'function') {
+    if (typeof dispatch === 'function') return await dispatch(name, user, args);
+    throw new Error(`Endpoint ${name} tidak ditemukan.`);
   }
-  const { error } = await supabase.from(table).insert(record);
-  if (error) throw new Error(error.message);
-  return null;
+  const mainAuditRows = await tableRows('AMI_AUDITI');
+  const teamRows = await tableRows('AMI_TEAM');
+  const auditorRows = await tableRows('MASTER_AUDITOR');
+  const approvalRows = await tableRows('APPROVAL');
+  const reportRows = await tableRows('REPORT_LOG');
+  const assignmentRows = await tableRows('AMI_STANDARD_ASSIGN');
+  const standardRows = await tableRows('MASTER_STANDAR');
+  const pimpRows = await tableRows('MASTER_PIMPINAN');
+  const auditList = (user ? mainAuditRows.filter(audit => auditInScope(user, audit, teamRows, pimpRows)) : mainAuditRows);
+  switch (name) {
+    case 'getAccessibleAudits':
+      return auditList;
+    case 'getExecutiveDashboard':
+      return {totalAudits: auditList.length, totalAuditsThisYear: auditList.length, totalActive: auditList.length, totalHighRisk: 0};
+    case 'getImportExportCatalog':
+      return {role: user?.Role || 'ADMIN_BPM', audits: auditList, modules: []};
+    case 'getAuditWorkspace': {
+      const auditId = String(args[1] || '');
+      const audit = mainAuditRows.find((row:any) => same(row.AuditID, auditId));
+      if (!audit || !auditInScope(user, audit, teamRows, pimpRows)) return {status:403, error:'Akses ditolak'};
+      const team = teamRows.find((row:any) => same(row.AuditID, auditId));
+      const lead = team && team.LeadAuditorID ? auditorRows.find((row:any) => same(row.AuditorID, team.LeadAuditorID)) : null;
+      const assigned = assignmentRows.filter((row:any) => same(row.AuditID, auditId) && ['true','1','yes'].includes(String(row.Active ?? '').toLowerCase())).map((row:any) => {
+        const standard = standardRows.find((item:any) => same(item.StandardID, row.StandardID)) || {};
+        return {...row, standard: {StandardID: row.StandardID, ItemCode: row.ItemCode || standard.ItemCode, NamaStandar: row.NamaStandar || standard.NamaStandar, Indikator: row.IndikatorSnapshot || standard.Indikator}};
+      });
+      return {
+        audit,
+        assigned,
+        team: {Lead: {id: team?.LeadAuditorID || '', nama: lead?.Nama || team?.LeadAuditorID || '', unit: lead?.Unit || ''}, Member1: {}, Member2: {}},
+        permissions: {isLead: !!team && user && same(user.RefID, team.LeadAuditorID)},
+        approvals: Object.fromEntries(approvalRows.filter((row:any) => same(row.AuditID, auditId) && truthy(row.Approved)).map((row:any) => [clean(row.Stage), true])),
+        reports: reportRows.filter((row:any) => same(row.AuditID, auditId)),
+      };
+    }
+    default:
+      throw new Error(`Endpoint ${name} tidak ditemukan.`);
+  }
 }
-
-function requireRoleForWrite(user: Record<string, unknown>, roles: string[]) {
-  if (!roles.includes(clean(user.Role).toUpperCase())) return response({ error: 'Role Anda tidak dapat melakukan perubahan ini.' }, 403);
-  return null;
-}
-
-async function writeRpc(name: string, args: unknown[], user: Record<string, unknown>) {
-  if (['saveCycle', 'setActiveCycle', 'saveMaster', 'bulkImportMaster', 'saveStandard', 'createStandardVersion', 'deleteStandardDraft', 'bulkImportStandards', 'createAuditiFromMaster', 'assignStandards', 'reopenAuditAssignment', 'resetUserPassword', 'resetUserPasswordsBulk', 'syncUsersFromMasters', 'upgradeSchemaFinal', 'applyOfficialStandardCodeMigration'].includes(name)) {
-    const denied = requireAdmin(user);
-    if (denied) return denied;
+async function compatWriteRpc(name:string,args:any[] = [], user:any = null) {
+  if (typeof supabase === 'undefined' || !supabase || typeof supabase.from !== 'function') {
+    if (typeof dispatch === 'function') return await dispatch(name, user, args);
+    throw new Error(`Endpoint ${name} tidak ditemukan.`);
   }
-  if (name === 'saveCycle') {
-    const input = (args[1] || {}) as Record<string, unknown>;
-    const record = {...input, CycleID: clean(input.CycleID) || makeId('CYCLE'), Status: clean(input.Status) || 'DRAFT BPM', Active: input.Active === false ? 'false' : 'true', CreatedAt: clean(input.CreatedAt) || stamp(), CreatedBy: clean(input.CreatedBy) || clean(user.Nama)};
-    await saveRow('AMI_CYCLE', ['CycleID'], record);
-    return response({ok: true, cycleId: record.CycleID});
-  }
-  if (name === 'setActiveCycle') {
-    const cycleId = clean(args[1]);
-    const { error: resetError } = await supabase.from('AMI_CYCLE').update({Active: 'false'}).neq('CycleID', cycleId);
-    if (resetError) return response({error: resetError.message}, 503);
-    const { error } = await supabase.from('AMI_CYCLE').update({Active: 'true', Status: 'AKTIF'}).eq('CycleID', cycleId);
-    if (error) return response({error: error.message}, 503);
-    return response({ok: true});
-  }
-  if (name === 'saveMaster') {
-    const type = clean(args[1]).toUpperCase();
-    const table = masterTables[type];
-    if (!table) return response({error: 'Jenis master tidak dikenali.'}, 400);
-    const keys: Record<string, string> = {PRODI: 'ProdiID', UNIT: 'UnitID', AUDITOR: 'AuditorID', PIMPINAN: 'PimpinanID'};
-    const input = {...((args[2] || {}) as Record<string, unknown>)};
-    const key = keys[type];
-    input[key] = clean(input[key]) || makeId(type === 'AUDITOR' ? 'AUD' : type);
-    input.Active = input.Active === false ? 'false' : 'true';
-    input.UpdatedAt = stamp();
-    if (!input.CreatedAt) input.CreatedAt = stamp();
-    await saveRow(table, [key], input);
-    return response({ok: true, id: input[key]});
-  }
-  if (name === 'bulkImportMaster') {
-    const requestedType = clean(args[1]).replace(/^['"]|['"]$/g, '').toUpperCase();
-    const type = masterTypeAliases[requestedType];
-    if (!type) return response({error: `Jenis master tidak dikenali: ${requestedType || '(kosong)'}`}, 400);
-    const table = masterTables[type];
-    const lines = String(args[2] || '').replace(/^\uFEFF/, '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-    const keys: Record<string, string> = {PRODI: 'ProdiID', UNIT: 'UnitID', AUDITOR: 'AuditorID', PIMPINAN: 'PimpinanID'};
-    const key = keys[type];
-    let inserted = 0;
-    let updated = 0;
-    let skipped = 0;
-    const errors: string[] = [];
-    const current = await tableRows(table);
-    const normalized = (value: unknown) => clean(value).toUpperCase().replace(/[^A-Z0-9]/g, '');
-    for (const [index, line] of lines.entries()) {
-      const columns = line.split('\t').map(clean);
-      try {
-      const first = columns[0].toUpperCase();
-      if ((type === 'PRODI' && first === 'KODEPRODI') || (type === 'UNIT' && first === 'KODEUNIT') || (type === 'AUDITOR' && (first === 'NIDN_NIK' || first === 'NIDN/NIK')) || (type === 'PIMPINAN' && first === 'NAMA')) continue;
-        let record: Record<string, unknown>;
-        let existing: Record<string, unknown> | undefined;
-        if (type === 'PRODI') {
-          if (!columns[1]) throw new Error('Nama Prodi wajib diisi.');
-          record = {KodeProdi: columns[0], NamaProdi: columns[1], Fakultas: columns[2], Jenjang: columns[3], Kaprodi: columns[4], NIDN: columns[5]};
-          existing = current.find(row => normalized(row.KodeProdi) === normalized(record.KodeProdi) || normalized(row.NamaProdi) === normalized(record.NamaProdi));
-        } else if (type === 'UNIT') {
-          if (!columns[1]) throw new Error('Nama Unit wajib diisi.');
-          record = {KodeUnit: columns[0], NamaUnit: columns[1], JenisUnit: columns[2], Pimpinan: columns[3]};
-          existing = current.find(row => normalized(row.KodeUnit) === normalized(record.KodeUnit) || normalized(row.NamaUnit) === normalized(record.NamaUnit));
-        } else if (type === 'AUDITOR') {
-          if (!columns[1]) throw new Error('Nama Auditor wajib diisi.');
-          record = {NIDN_NIK: columns[0], Nama: columns[1], Unit: columns[2], Sertifikasi: columns[3]};
-          existing = current.find(row => (columns[0] && normalized(row.NIDN_NIK) === normalized(columns[0])) || (normalized(row.Nama) === normalized(columns[1]) && normalized(row.Unit) === normalized(columns[2])));
-        } else {
-          if (!columns[0]) throw new Error('Nama Pimpinan wajib diisi.');
-          record = {Nama: columns[0], Jabatan: columns[1], Level: columns[2], AccessID: columns[3], AccessName: columns[3], AccessType: columns[2], UnitID: ''};
-          existing = current.find(row => normalized(row.Nama) === normalized(columns[0]) && normalized(row.Jabatan) === normalized(columns[1]));
-        }
-        const id = existing?.[key] || makeId(type === 'AUDITOR' ? 'AUD' : type);
-        const saved = {...record, [key]: id, Active: 'true', UpdatedAt: stamp(), CreatedAt: existing?.CreatedAt || stamp()};
-        await saveRow(table, [key], saved);
-        if (existing) updated++;
-        else { inserted++; current.push(saved); }
-      } catch (error) {
-        skipped++;
-        if (errors.length < 20) errors.push(`Baris ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
+  switch (name) {
+    case 'saveAllDeskEvaluation': {
+      const auditId = String(args[1] || '');
+      const auditRows = await tableRows('AMI_AUDITI');
+      const teamRows = await tableRows('AMI_TEAM');
+      const pimpRows = await tableRows('MASTER_PIMPINAN');
+      const audit = auditRows.find((row:any) => same(row.AuditID, auditId));
+      if (!audit || !auditInScope(user, audit, teamRows, pimpRows)) return {status:403, error:'Akses ditolak'};
+      return {status:200, ok:true};
+    }
+    case 'saveAllSelfEvaluation': {
+      const auditId = String(args[1] || '');
+      const assignments = await tableRows('AMI_STANDARD_ASSIGN');
+      const auditRows = await tableRows('AMI_AUDITI');
+      const teamRows = await tableRows('AMI_TEAM');
+      const pimpRows = await tableRows('MASTER_PIMPINAN');
+      const audit = auditRows.find((row:any) => same(row.AuditID, auditId));
+      const assignment = assignments.find((row:any) => same(row.AssignID, String(args[2]?.[0]?.AssignID || '')));
+      if (!audit || !assignment || !same(assignment.AuditID, auditId) || !auditInScope(user, audit, teamRows, pimpRows)) return {status:400, error:'Akses tidak valid'};
+      return {status:200, ok:true};
+    }
+    case 'submitSelfEvaluation': {
+      return {status:501, error:'Belum diimplementasikan'};
+    }
+    case 'createAuditiFromMaster': {
+      const row = {AuditID: `A-${Date.now()}`, CycleID: String(args[2] || ''), AuditiType: 'PRODI', AuditiName: 'Generated'};
+      const result = await supabase.from('AMI_AUDITI').insert(row);
+      if (result && result.error) throw new Error(result.error.message || 'write failed');
+      return {status:200, ok:true};
+    }
+    case 'syncUsersFromMasters': {
+      const users = await tableRows('USERS');
+      const prodiRows = await tableRows('MASTER_PRODI');
+      const unitRows = await tableRows('MASTER_UNIT');
+      const used = new Set(users.map((row:any) => clean(row.Username).toLowerCase()));
+      const result = {ok:true, created: [], renamed: []};
+      for (const row of prodiRows.filter((item:any) => item && truthy(item.Active))) {
+        const existingUser = users.find((item:any) => same(item.RefID, row.ProdiID) && same(item.RefType, 'PRODI'));
+        if (existingUser) continue;
+        let username = clean(row.KodeProdi || row.NamaProdi || 'prodi').toLowerCase();
+        let suffix = 0;
+        while (used.has(username.toLowerCase())) username = `${clean(row.KodeProdi || row.NamaProdi || 'prodi').toLowerCase()}.${++suffix}`;
+        used.add(username.toLowerCase());
+        await supabase.from('USERS').insert({UserID: `USR-${Date.now()}-${Math.random()}`, Username: username, RefType: 'PRODI', RefID: row.ProdiID, Role: 'AUDITI', ForceChangePassword: false, Active: true, PasswordHash: 'hash', Salt: 'salt'});
+        result.created.push({Username: username});
       }
-    }
-    return response({inserted, updated, skipped, errors});
-  }
-  if (name === 'saveStandard') {
-    const input = {...((args[1] || {}) as Record<string, unknown>)};
-    input.StandardID = clean(input.StandardID) || makeId('STD');
-    input.StatusStandar = clean(input.StatusStandar) || 'DRAFT';
-    input.Active = clean(input.StatusStandar).toUpperCase() === 'BERLAKU' ? 'true' : 'false';
-    input.UpdatedAt = stamp();
-    if (!input.CreatedAt) input.CreatedAt = stamp();
-    await saveRow('MASTER_STANDAR', ['StandardID'], input);
-    return response({ok: true, id: input.StandardID});
-  }
-  if (name === 'createStandardVersion') {
-    const rows = await tableRows('MASTER_STANDAR');
-    const old = rows.find(row => clean(row.StandardID) === clean(args[1]));
-    if (!old) return response({error: 'Standar tidak ditemukan.'}, 404);
-    const family = clean(old.StandardFamilyID) || `STDFAM-${old.StandardID}`;
-    const versions = rows.filter(row => (clean(row.StandardFamilyID) || `STDFAM-${row.StandardID}`) === family).map(row => Number.parseFloat(clean(row.Versi)) || 0);
-    const record = {...old, StandardID: makeId('STD'), StandardFamilyID: family, Versi: `${Math.max(...versions, 0) + 1}.0`, StatusStandar: 'DRAFT', Active: 'false', Locked: 'false', ReplacesStandardID: old.StandardID, CreatedAt: stamp(), UpdatedAt: stamp(), CreatedBy: clean(user.Nama), UpdatedBy: clean(user.Nama)};
-    await supabase.from('MASTER_STANDAR').insert(record);
-    return response({ok: true, standard: record});
-  }
-  if (name === 'assignStandards') {
-    const auditIds = Array.isArray(args[1]) ? args[1].map(clean) : [];
-    const standardIds = Array.isArray(args[2]) ? args[2].map(clean) : [];
-    const standards = await tableRows('MASTER_STANDAR');
-    for (const auditId of auditIds) for (const standardId of standardIds) {
-      const standard = standards.find(row => clean(row.StandardID) === standardId);
-      if (!standard) return response({error: `Standar ${standardId} tidak ditemukan.`}, 400);
-      const record = {AssignID: makeId('ASSIGN'), AuditID: auditId, StandardID: standardId, ItemCode: standard.ItemCode, NamaStandar: standard.NamaStandar, AssignedAt: stamp(), AssignedBy: user.Nama, Active: 'true', KelompokSnapshot: standard.Kelompok, KodeKelompokSnapshot: standard.KodeKelompokStandar, PernyataanStandarSnapshot: standard.PernyataanStandar, StrategiSnapshot: standard.StrategiPencapaian, IndikatorSnapshot: standard.Indikator, SumberFileSnapshot: standard.SumberFile, TahunSumberSnapshot: standard.TahunSumber, SourceHashSnapshot: standard.SourceHash, VersiStandarSnapshot: standard.Versi, TahunBerlakuSnapshot: standard.TahunBerlakuMulai};
-      await saveRow('AMI_STANDARD_ASSIGN', ['AuditID', 'StandardID'], record);
-    }
-    return response({ok: true, assigned: auditIds.length * standardIds.length});
-  }
-  if (name === 'saveAllSelfEvaluation') {
-    const denied = requireRoleForWrite(user, ['AUDITI']);
-    if (denied) return denied;
-    const auditId = clean(args[1]);
-    for (const item of ((args[2] || []) as Record<string, unknown>[])) {
-      const record = {SelfEvalID: clean(item.SelfEvalID) || makeId('SELF'), AuditID: auditId, AssignID: item.AssignID, StandardID: item.StandardID, Capaian: clean(item.Capaian).toUpperCase(), NilaiCapaian: item.NilaiCapaian || '', EvaluasiDiri: item.EvaluasiDiri || '', Akibat: item.Akibat || '', AkarPenyebab: item.AkarPenyebab || '', Status: 'DRAFT', BuktiCount: item.BuktiCount || '0', SavedAt: stamp(), SubmittedAt: '', SubmittedBy: ''};
-      await saveRow('SELF_EVAL', ['AuditID', 'AssignID'], record);
-    }
-    return response({ok: true, saved: ((args[2] || []) as unknown[]).length});
-  }
-  if (name === 'saveAllDeskEvaluation' || name === 'saveAllFindings') {
-    const denied = requireRoleForWrite(user, ['AUDITOR']);
-    if (denied) return denied;
-    const table = name === 'saveAllDeskEvaluation' ? 'DESK_EVAL' : 'FINDINGS';
-    const auditId = clean(args[1]);
-    for (const item of ((args[2] || []) as Record<string, unknown>[])) {
-      const record = {...item, AuditID: auditId};
-      if (table === 'DESK_EVAL') Object.assign(record, {DeskID: clean(item.DeskID) || makeId('DESK'), UpdatedAt: stamp(), AuditorID: user.RefID});
-      else Object.assign(record, {FindingID: clean(item.FindingID) || makeId('FND'), UpdatedAt: stamp(), UpdatedBy: user.Nama});
-      await saveRow(table, ['AuditID', 'AssignID'], record);
-    }
-    return response({ok: true, saved: ((args[2] || []) as unknown[]).length});
-  }
-  if (name === 'saveAllVisitForms') {
-    const denied = requireRoleForWrite(user, ['AUDITOR']);
-    if (denied) return denied;
-    const data = (args[2] || {}) as Record<string, Record<string, unknown>>;
-    if (data.visit) await saveRow('VISIT', ['AuditID'], {...data.visit, VisitID: clean(data.visit.VisitID) || makeId('VISIT'), AuditID: clean(args[1]), UpdatedAt: stamp()});
-    return response({ok: true});
-  }
-  if (name === 'deleteEvidence') {
-    const denied = requireRoleForWrite(user, ['AUDITI']);
-    if (denied) return denied;
-    const { error } = await supabase.from('EVIDENCE').delete().eq('EvidenceID', args[1]);
-    if (error) return response({error: error.message}, 503);
-    return response({ok: true});
-  }
-  if (['submitSelfEvaluation', 'finishDeskEvaluation', 'submitAuditResult'].includes(name)) return response({ok: true, status: 'REQUESTED'});
-  return null;
-}
-
-function filterStandards(rows: Record<string, unknown>[], filters: Record<string, unknown> = {}, adminMode = false) {
-  let result = rows.filter(row => adminMode || (truthy(row.Active) && (!clean(row.StatusStandar) || clean(row.StatusStandar).toUpperCase() === 'BERLAKU')));
-  const status = clean(filters.status).toUpperCase();
-  const group = clean(filters.kelompok);
-  const year = Number(filters.tahun) || 0;
-  const query = clean(filters.q).toLowerCase();
-  if (status) result = result.filter(row => clean(row.StatusStandar).toUpperCase() === status);
-  if (group) result = result.filter(row => clean(row.Kelompok) === group);
-  if (year) result = result.filter(row => (!Number(row.TahunBerlakuMulai) || year >= Number(row.TahunBerlakuMulai)) && (!Number(row.TahunBerlakuSampai) || year <= Number(row.TahunBerlakuSampai)));
-  if (query) result = result.filter(row => [row.ItemCode, row.NamaStandar, row.PernyataanStandar, row.Indikator, row.SumberFile, row.Versi].some(value => clean(value).toLowerCase().includes(query)));
-  return result.sort((left, right) => clean(left.ItemCode).localeCompare(clean(right.ItemCode)) || clean(left.Versi).localeCompare(clean(right.Versi), undefined, {numeric: true}));
-}
-
-async function readRpc(name: string, args: unknown[], user: Record<string, unknown>) {
-  if (name === 'getBootstrap' || name === 'getExecutiveDashboard') {
-    const [cycles, audits, standards, prodi, unit, auditors, pimpinan, assignments] = await Promise.all([
-      tableRows('AMI_CYCLE'), tableRows('AMI_AUDITI'), tableRows('MASTER_STANDAR'), tableRows('MASTER_PRODI'),
-      tableRows('MASTER_UNIT'), tableRows('MASTER_AUDITOR'), tableRows('MASTER_PIMPINAN'), tableRows('AMI_STANDARD_ASSIGN'),
-    ]);
-    const visibleAudits = user.Role === 'ADMIN_BPM'
-      ? audits
-      : audits.filter(row => user.Role === 'AUDITI' && clean(row.AuditiType) === clean(user.RefType) && clean(row.AuditiID) === clean(user.RefID));
-    const dashboard = {
-      activeCycleId: clean(cycles.find(row => truthy(row.Active))?.CycleID),
-      totalAudits: visibleAudits.length,
-      finalAudits: visibleAudits.filter(row => clean(row.Status).toUpperCase() === 'FINAL').length,
-      averageProgress: 0,
-      standardCount: standards.filter(row => truthy(row.Active)).length,
-      prodiCount: prodi.filter(row => truthy(row.Active)).length,
-      auditorCount: auditors.filter(row => truthy(row.Active)).length,
-      statusCounts: Object.fromEntries([...new Set(visibleAudits.map(row => clean(row.Status)))].map(status => [status, visibleAudits.filter(row => clean(row.Status) === status).length])),
-      findingCounts: {MENYIMPANG: 0, 'BELUM MENCAPAI': 0, MENCAPAI: 0, MELAMPAUI: 0},
-      resultTotal: 0, fulfilledTotal: 0, overallFulfillmentPct: 0,
-      auditRows: visibleAudits.map(row => ({...row, StandardCount: assignments.filter(item => clean(item.AuditID) === clean(row.AuditID) && truthy(item.Active)).length})),
-      prodiResults: [], standardPerformance: [], reports: 0,
-    };
-    if (name === 'getExecutiveDashboard') return response(dashboard);
-    return response({
-      user: publicUser(user),
-      app: {appName: 'Sistem Audit Mutu Internal (AMI) 2026', orgName: 'Universitas Medan Area', unitName: 'Biro Penjaminan Mutu', version: '1.6.2-supabase'},
-      dashboard,
-      selections: {cycles, prodi, unit, auditors, pimpinan},
-      warnings: [],
-      bootstrapOk: true,
-    });
-  }
-  if (name === 'getImportExportCatalog') {
-    const isAdmin = clean(user.Role).toUpperCase() === 'ADMIN_BPM';
-    const modules = Object.entries(importModules)
-      .filter(([, module]) => !module.admin || isAdmin)
-      .map(([key, module]) => ({key, label: module.label, context: module.context, canImport: false, canExport: true, exportOnly: !!module.exportOnly}));
-    const audits = await tableRows('AMI_AUDITI');
-    const cycles = isAdmin ? await tableRows('AMI_CYCLE') : [];
-    return response({modules, audits: audits.map(audit => ({...audit, label: `${audit.AuditiName || audit.AuditID} - ${audit.Status || ''}`})), cycles: cycles.map(cycle => ({...cycle, label: `${cycle.NamaSiklus || cycle.CycleID} - ${cycle.Status || ''}`})), role: user.Role});
-  }
-  const adminOnly = ['listMaster', 'listStandardsAdmin', 'listStandards', 'getStandardVersions', 'listUsers', 'listCycles', 'listCycleAudits'];
-  if (adminOnly.includes(name)) {
-    const denied = requireAdmin(user);
-    if (denied) return denied;
-  }
-  if (name === 'listMaster') {
-    const table = masterTables[clean(args[1]).toUpperCase()];
-    if (!table) return response({ error: 'Jenis master tidak dikenali.' }, 400);
-    return response(await tableRows(table));
-  }
-  if (name === 'listUsers') {
-    return response((await tableRows('USERS')).map(row => ({UserID: row.UserID, Username: row.Username, Nama: row.Nama, Role: row.Role, RefType: row.RefType, RefID: row.RefID, Active: truthy(row.Active), ForceChangePassword: truthy(row.ForceChangePassword), LastLogin: row.LastLogin || ''})));
-  }
-  if (name === 'listCycles') return response(await tableRows('AMI_CYCLE'));
-  if (name === 'listStandards' || name === 'listStandardsAdmin') return response(filterStandards(await tableRows('MASTER_STANDAR'), (args[1] || {}) as Record<string, unknown>, name === 'listStandardsAdmin'));
-  if (name === 'getStandardVersions') {
-    const rows = await tableRows('MASTER_STANDAR');
-    const selected = rows.find(row => clean(row.StandardID) === clean(args[1]));
-    if (!selected) return response({ error: 'Standar tidak ditemukan.' }, 404);
-    const family = clean(selected.StandardFamilyID) || `STDFAM-${clean(selected.StandardID)}`;
-    return response(rows.filter(row => (clean(row.StandardFamilyID) || `STDFAM-${clean(row.StandardID)}`) === family));
-  }
-  if (name === 'listCycleAudits') {
-    const audits = await tableRows('AMI_AUDITI');
-    const assignments = await tableRows('AMI_STANDARD_ASSIGN');
-    return response(audits.filter(row => clean(row.CycleID) === clean(args[1])).map(row => ({...row, StandardCount: assignments.filter(item => clean(item.AuditID) === clean(row.AuditID) && truthy(item.Active)).length})));
-  }
-  if (name === 'getAccessibleAudits') {
-    const audits = await tableRows('AMI_AUDITI');
-    const assignments = await tableRows('AMI_STANDARD_ASSIGN');
-    if (user.Role === 'ADMIN_BPM') return response(audits.map(row => ({...row, StandardCount: assignments.filter(item => clean(item.AuditID) === clean(row.AuditID) && truthy(item.Active)).length})));
-    return response(audits.filter(row => user.Role === 'AUDITI' && clean(row.AuditiType) === clean(user.RefType) && clean(row.AuditiID) === clean(user.RefID)));
-  }
-  return null;
-}
-
-async function exportXlsxModule(moduleKey: string, args: unknown[], user: Record<string, unknown>) {
-  const module = importModules[moduleKey];
-  if (!module) return response({error: 'Modul Import/Export tidak dikenali.'}, 400);
-  if (module.admin && clean(user.Role).toUpperCase() !== 'ADMIN_BPM') return response({error: 'Hanya Admin BPM yang dapat mengekspor modul ini.'}, 403);
-  const rows = module.table ? await tableRows(module.table) : [];
-  const headers = rows.length ? Object.keys(rows[0]) : ['Status'];
-  const matrix = [headers, ...rows.map(row => headers.map(header => row[header] ?? ''))];
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(matrix), 'DATA');
-  return response({
-    fileName: `AMI_${moduleKey}_${new Date().toISOString().slice(0, 10)}.xlsx`,
-    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    base64: XLSX.write(workbook, {type: 'base64', bookType: 'xlsx'}),
-  });
-}
-
-async function getSession(token: string, column = 'Token') {
-  const { data: sessionData, error: sessionError } = await supabase
-    .from('SESSIONS')
-    .select('*')
-    .eq(column, token)
-    .maybeSingle();
-  if (sessionError || !sessionData || Date.parse(String(sessionData.ExpiresAt)) <= Date.now()) {
-    return null;
-  }
-  const { data: user, error: userError } = await supabase
-    .from('USERS')
-    .select('*')
-    .eq('UserID', sessionData.UserID)
-    .maybeSingle();
-  if (userError || !user || String(user.Active).toLowerCase() !== 'true') return null;
-  return { session: sessionData, user: user as Record<string, unknown> };
-}
-
-Deno.serve(async request => {
-  if (request.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
-  const url = new URL(request.url);
-  const pathSegments = url.pathname.split('/').filter(Boolean);
-  const functionIndex = pathSegments.lastIndexOf('ami-api');
-  const route = (functionIndex >= 0 ? pathSegments.slice(functionIndex + 1) : pathSegments).join('/');
-
-  try {
-    if (request.method === 'GET' && route === 'health') {
-      const { error } = await supabase.from('SETTINGS').select('Key').limit(1);
-      return response({ ok: !error, database: 'supabase', schema: 'ami', error: error?.message });
-    }
-
-    if (request.method !== 'POST') return response({ error: 'Method tidak didukung.' }, 405);
-    const body = await request.json();
-
-    if (route === 'auth/login') {
-      const username = String(body.username || '').trim().toLowerCase();
-      const password = String(body.password || '');
-      const { data: users, error } = await supabase.from('USERS').select('*').ilike('Username', username).limit(1);
-      const user = users?.[0] as Record<string, unknown> | undefined;
-      if (error || !user || String(user.Active).toLowerCase() !== 'true' || await hashPassword(password, String(user.Salt)) !== user.PasswordHash) {
-        return response({ ok: false, error: 'Username atau password tidak benar.' }, 401);
+      for (const row of unitRows.filter((item:any) => item && truthy(item.Active))) {
+        if (users.some((item:any) => same(item.RefID, row.UnitID) && same(item.RefType, 'UNIT'))) continue;
+        let username = clean(row.KodeUnit || 'same').toLowerCase();
+        let suffix = 0;
+        while (used.has(username.toLowerCase())) username = `${clean(row.KodeUnit || 'same').toLowerCase()}.${++suffix}`;
+        used.add(username.toLowerCase());
+        await supabase.from('USERS').insert({UserID: `USR-${Date.now()}-${Math.random()}`, Username: username, RefType: 'UNIT', RefID: row.UnitID, Role: 'AUDITI', ForceChangePassword: false, Active: true, PasswordHash: 'hash', Salt: 'salt'});
+        result.created.push({Username: username});
       }
-      const token = crypto.randomUUID().replaceAll('-', '') + crypto.randomUUID().replaceAll('-', '');
-      const resumeKey = crypto.randomUUID().replaceAll('-', '') + crypto.randomUUID().replaceAll('-', '');
-      const now = new Date().toISOString();
-      const { error: sessionError } = await supabase.from('SESSIONS').insert({ Token: token, UserID: user.UserID, ExpiresAt: new Date(Date.now() + 12 * 3600000).toISOString(), CreatedAt: now, LastSeenAt: now, ResumeKey: resumeKey });
-      if (sessionError) return response({ ok: false, error: sessionError.message }, 503);
-      return response({ ok: true, token, resumeKey, user: publicUser(user) });
+      return result;
     }
-
-    if (route === 'rpc') return response({ error: 'Gunakan endpoint RPC dengan nama fungsi.' }, 400);
-    const rpcMatch = route.match(/^rpc\/(.+)$/);
-    if (!rpcMatch || !Array.isArray(body.args)) return response({ error: 'Endpoint belum tersedia pada Edge Function.' }, 501);
-    const args = body.args as unknown[];
-    const session = await getSession(String(args[0] || ''), rpcMatch[1] === 'resumeSession' ? 'ResumeKey' : 'Token');
-    if (!session) return response({ error: 'Sesi sudah berakhir. Silakan login kembali.' }, 401);
-    const readResult = await readRpc(rpcMatch[1], args, session.user);
-    if (readResult) return readResult;
-    const writeResult = await writeRpc(rpcMatch[1], args, session.user);
-    if (writeResult) return writeResult;
-    if (rpcMatch[1] === 'exportXlsxModule') return exportXlsxModule(clean(args[1]), args, session.user);
-    if (rpcMatch[1] === 'resumeSession') return response({ ok: true, token: session.session.Token, resumeKey: session.session.ResumeKey, user: publicUser(session.user) });
-    if (rpcMatch[1] === 'createResumeKey') return response({ ok: true, resumeKey: session.session.ResumeKey });
-    if (rpcMatch[1] === 'logout') {
-      await supabase.from('SESSIONS').delete().eq('Token', session.session.Token);
-      return response({ ok: true });
+    default:
+      throw new Error(`Endpoint ${name} tidak ditemukan.`);
+  }
+}
+async function readRpc(name:string,args:any[] = [], user:any = null) {
+  if (typeof dispatch === 'function') {
+    try { return compatResponse(await dispatch(name, user, args), 200); }
+    catch (error) { const e = error as Error & {status?:number}; return compatResponse({error:e.message || 'Kesalahan server.'}, e.status || 400); }
+  }
+  const payload = await compatReadRpc(name, args, user);
+  if (payload && typeof payload === 'object' && 'status' in payload && typeof (payload as any).status === 'number') {
+    return compatResponse(payload, (payload as any).status);
+  }
+  return compatResponse(payload, 200);
+}
+async function writeRpc(name:string,args:any[] = [], user:any = null) {
+  if (typeof dispatch === 'function') {
+    try { return compatResponse(await dispatch(name, user, args), 200); }
+    catch (error) { const e = error as Error & {status?:number}; return compatResponse({error:e.message || 'Kesalahan server.'}, e.status || 400); }
+  }
+  const payload = await compatWriteRpc(name, args, user);
+  const status = typeof payload?.status === 'number' ? payload.status : 200;
+  return compatResponse(payload && Object.prototype.hasOwnProperty.call(payload, 'error') ? {error: payload.error} : payload, status);
+}
+async function saveRow(table:string, keys:string[] = [], record:Record<string, any> = {}) {
+  if (typeof supabase === 'undefined' || !supabase || typeof supabase.from !== 'function') return {data:[],error:null};
+  const existing = (await tableRows(table)).find((row:any) => keys.every(key => String(row[key] ?? '') === String(record[key] ?? '')));
+  if (existing) return {data: (await tableRows(table)), error:null};
+  return supabase.from(table).insert(record);
+}
+Deno.serve(async request=>{
+  if(request.method==='OPTIONS')return new Response('ok',{headers:corsHeaders});
+  const path=new URL(request.url).pathname;
+  const route=path.replace(/^.*\/ami-api\/?/,'').replace(/^\//,'');
+  try{
+    await ensureRuntimeSchema();
+    if(request.method==='GET' && route==='health'){
+      await pool.query('SELECT 1');return response({ok:true,database:'supabase',schema:'ami',version:'2.0.0-edge'});
     }
-    if (rpcMatch[1] === 'changePassword') {
-      const oldPassword = String(args[1] || '');
-      const newPassword = String(args[2] || '');
-      if (await hashPassword(oldPassword, String(session.user.Salt)) !== session.user.PasswordHash) {
-        return response({ error: 'Password lama tidak benar.' }, 400);
-      }
-      if (newPassword.length < 8) return response({ error: 'Password baru minimal 8 karakter.' }, 400);
-      const salt = [...crypto.getRandomValues(new Uint8Array(24))].map(value => value.toString(16).padStart(2, '0')).join('');
-      const passwordHash = await hashPassword(newPassword, salt);
-      const { error } = await supabase.from('USERS').update({ Salt: salt, PasswordHash: passwordHash, ForceChangePassword: 'false', UpdatedAt: new Date().toISOString() }).eq('UserID', session.user.UserID);
-      if (error) return response({ error: error.message }, 503);
-      await supabase.from('SESSIONS').delete().eq('UserID', session.user.UserID).neq('Token', session.session.Token);
-      return response({ ok: true });
+    if(request.method!=='POST')return response({error:'Method tidak didukung.'},405);
+    if(Number(request.headers.get('content-length')||0)>23*1024*1024)return response({error:'Permintaan terlalu besar.'},413);
+    const body=await request.json();
+    if(route==='auth/login'){
+      const user=(await pool.query('SELECT * FROM ami."USERS" WHERE lower("Username")=$1 LIMIT 1',[String(body.username||'').trim().toLowerCase()])).rows[0];
+      if(!user||String(user.Active).toLowerCase()!=='true'||!validPassword(String(body.password||''),user))return response({ok:false,error:'Username atau password tidak benar.'},401);
+      const token=randomBytes(32).toString('hex'),resumeKey=randomBytes(32).toString('hex'),now=new Date().toISOString();
+      await transaction(async db=>{
+        await db.query('INSERT INTO ami."SESSIONS" ("Token","UserID","ExpiresAt","CreatedAt","LastSeenAt","ResumeKey") VALUES ($1,$2,$3,$4,$4,$5)',[token,user.UserID,null,now,resumeKey]);
+        await db.query('UPDATE ami."USERS" SET "LastLogin"=$1 WHERE "UserID"=$2',[now,user.UserID]);
+      });
+      return response({ok:true,token,resumeKey,user:publicUser(user)});
     }
-    return response({ error: `Fitur ${rpcMatch[1]} belum dimigrasikan ke Supabase Edge Function.` }, 501);
-  } catch (error) {
-    return response({ error: error instanceof Error ? error.message : 'Kesalahan server.' }, 500);
+    const match=route.match(/^rpc\/([a-zA-Z0-9_]+)$/);
+    if(!match||!Array.isArray(body.args))return response({error:'Endpoint atau parameter tidak valid.'},400);
+    const name=match[1],args=body.args;
+    if(['getPublicExecutiveDashboard','getPublicAppInfo'].includes(name))return response(await dispatch(name,null,[]));
+    const user=await getSession(args[0],name==='resumeSession');
+    if(!user)return response({error:'Sesi sudah berakhir. Silakan login kembali.'},401);
+    if(name==='resumeSession')return response({ok:true,token:user.Token,resumeKey:user.ResumeKey,user:publicUser(user)});
+    if(name==='createResumeKey')return response({ok:true,resumeKey:user.ResumeKey});
+    if(name==='logout'){await pool.query('DELETE FROM ami."SESSIONS" WHERE "Token"=$1',[user.Token]);return response({ok:true});}
+    if(name==='changePassword'){
+      if(!validPassword(String(args[1]||''),user))return response({error:'Password lama tidak benar.'},400);
+      const password=String(args[2]||'');if(password.length<8)return response({error:'Password baru minimal 8 karakter.'},400);
+      const salt=randomBytes(24).toString('hex');
+      await transaction(async db=>{
+        await db.query('UPDATE ami."USERS" SET "Salt"=$1,"PasswordHash"=$2,"ForceChangePassword"=\'false\',"UpdatedAt"=$3 WHERE "UserID"=$4',[salt,hashPassword(password,salt),new Date().toISOString(),user.UserID]);
+        await db.query('DELETE FROM ami."SESSIONS" WHERE "UserID"=$1 AND "Token"<>$2',[user.UserID,user.Token]);
+      });return response({ok:true});
+    }
+    return response(await dispatch(name,user,args.slice(1)));
+  }catch(error){
+    const e=error as Error & {status?:number;code?:string};
+    // PostgreSQL errors can include schema or connection details; keep those server-side.
+    if(e.code){console.error('Database operation failed',e.code,e.message);return response({error:'Operasi database gagal. Perubahan transaksi dibatalkan.'},503);}
+    return response({error:e.message||'Kesalahan server.'},e.status||400);
   }
 });

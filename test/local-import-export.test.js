@@ -61,6 +61,17 @@ test('validateImportXlsx rejects a workbook with missing headers', async () => {
   );
 });
 
+test('validateImportXlsx rejects invalid master enums and Active values', async () => {
+  const result = await validateImportXlsx(pool, 'ami', user, 'MASTER_UNIT', {}, 'bad-types.xlsx', '', workbook([
+    ['KodeUnit','NamaUnit','JenisUnit','Pimpinan','Active'],
+    ['U1','Unit Salah','INVALID','Pimpinan','MUNGKIN']
+  ]));
+  assert.equal(result.valid, 0);
+  assert.equal(result.invalid, 1);
+  assert.match(result.errors[0], /JenisUnit/);
+  assert.match(result.errors[0], /Active/);
+});
+
 test('commitImportXlsx persists FORM2 JSON and resolves DESK_EVALUATION assignment', async () => {
   const seed = {
     AMI_AUDITI: [{AuditID:'a1', CycleID:'c1', AuditiType:'PRODI', AuditiID:'TI', AuditiName:'Teknik Informatika'}],
