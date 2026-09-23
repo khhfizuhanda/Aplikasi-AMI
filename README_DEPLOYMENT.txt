@@ -94,12 +94,15 @@ CATATAN PERFORMANCE
 - Workspace menggunakan snapshot standar dan hanya membaca seluruh MASTER_STANDAR bila diperlukan.
 - Dashboard publik memakai cache singkat agar pembukaan serentak tidak membebani server berulang.
 
-DEPLOY NODE.JS KE RENDER
-1. Buka Render dan pilih New > Blueprint.
-2. Hubungkan repository GitHub `khhfizuhanda/Aplikasi-AMI`.
-3. Pilih branch `main`; Render akan membaca `render.yaml`.
-4. Konfirmasi pembuatan web service `aplikasi-ami` dan database `ami-postgres`.
-5. Tunggu build dan deploy selesai. Schema PostgreSQL dijalankan otomatis sebelum server dimulai.
-6. Buka URL service Render, misalnya `https://aplikasi-ami.onrender.com/?view=login`.
+DEPLOY NODE.JS KE RENDER + SUPABASE
+1. Buat project PostgreSQL Free di Supabase.
+2. Salin connection string PostgreSQL dari Supabase. Gunakan connection pooling URL bila tersedia.
+3. Buka Render dan pilih New > Blueprint.
+4. Hubungkan repository GitHub `khhfizuhanda/Aplikasi-AMI` pada branch `main`.
+5. Saat diminta, isi `DATABASE_URL` dengan connection string Supabase.
+6. Pastikan `PGSSL=true`; Render akan membaca `render.yaml`.
+7. Tunggu build dan deploy selesai. Schema PostgreSQL dijalankan otomatis sebelum server dimulai.
+8. Aktifkan GitHub Pages dari Settings > Pages > Deploy from a branch, pilih `main` dan folder `/docs`.
+9. Buka frontend di `https://khhfizuhanda.github.io/Aplikasi-AMI/`.
 
-Health check tersedia di `/api/health`. Pada paket Render, `DATABASE_URL` disediakan otomatis oleh database Render.
+Backend Render tersedia di `https://aplikasi-ami.onrender.com`; health check tersedia di `/api/health`.

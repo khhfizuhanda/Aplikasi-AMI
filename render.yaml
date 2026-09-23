@@ -8,16 +8,12 @@ services:
     healthCheckPath: /api/health
     envVars:
       - key: DATABASE_URL
-        fromDatabase:
-          name: ami-postgres
-          property: connectionString
+        sync: false
+      - key: PGSSL
+        value: "true"
       - key: PGSCHEMA
         value: ami
       - key: NODE_ENV
         value: production
-
-databases:
-  - name: ami-postgres
-    databaseName: ami
-    user: ami
-    plan: free
+      - key: ALLOWED_ORIGINS
+        value: https://khhfizuhanda.github.io
