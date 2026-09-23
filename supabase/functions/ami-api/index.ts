@@ -53,7 +53,9 @@ async function getSession(token: string, column = 'Token') {
 Deno.serve(async request => {
   if (request.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   const url = new URL(request.url);
-  const route = url.pathname.replace(/^\/functions\/v1\/ami-api\/?/, '').replace(/^\/?/, '');
+  const pathSegments = url.pathname.split('/').filter(Boolean);
+  const functionIndex = pathSegments.lastIndexOf('ami-api');
+  const route = (functionIndex >= 0 ? pathSegments.slice(functionIndex + 1) : pathSegments).join('/');
 
   try {
     if (request.method === 'GET' && route === 'health') {

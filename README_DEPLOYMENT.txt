@@ -97,9 +97,11 @@ CATATAN PERFORMANCE
 DEPLOY GITHUB PAGES + SUPABASE EDGE FUNCTIONS
 1. Buat project PostgreSQL Free di Supabase.
 2. Jalankan schema pada `postgres/schema.sql` melalui SQL Editor Supabase.
-3. Aktifkan Edge Function `ami-api` dari folder `supabase/functions/ami-api`.
-4. Set secret `SUPABASE_SERVICE_ROLE_KEY` pada Supabase Edge Functions.
-5. Aktifkan GitHub Pages dari Settings > Pages > Deploy from a branch, pilih `main` dan folder `/docs`.
-6. Buka frontend di `https://khhfizuhanda.github.io/Aplikasi-AMI/`.
+3. Pada Supabase Dashboard > Settings > API, tambahkan `ami` ke **Exposed schemas**.
+4. Jalankan `GRANT USAGE ON SCHEMA ami TO anon, authenticated, service_role;` melalui SQL Editor.
+5. Aktifkan Edge Function `ami-api` dari folder `supabase/functions/ami-api`.
+6. Set secret `SUPABASE_SERVICE_ROLE_KEY` pada Supabase Edge Functions.
+7. Aktifkan GitHub Pages dari Settings > Pages > Deploy from a branch, pilih `main` dan folder `/docs`.
+8. Buka frontend di `https://khhfizuhanda.github.io/Aplikasi-AMI/`.
 
 Endpoint backend: `https://iabubetffbzsjestjqxp.supabase.co/functions/v1/ami-api`.
