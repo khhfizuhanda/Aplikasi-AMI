@@ -37,6 +37,110 @@ function publicUser(user: Record<string, unknown>) {
   };
 }
 
+const masterTables: Record<string, string> = {
+  PRODI: 'MASTER_PRODI',
+  UNIT: 'MASTER_UNIT',
+  AUDITOR: 'MASTER_AUDITOR',
+  PIMPINAN: 'MASTER_PIMPINAN',
+};
+
+const clean = (value: unknown) => String(value ?? '').trim();
+const truthy = (value: unknown) => value === true || ['true', '1', 'yes'].includes(clean(value).toLowerCase());
+
+function requireAdmin(user: Record<string, unknown>) {
+  if (user.Role !== 'ADMIN_BPM') return response({ error: 'Hanya Admin BPM yang dapat mengakses data ini.' }, 403);
+  return null;
+}
+
+async function tableRows(table: string) {
+  const { data, error } = await supabase.from(table).select('*');
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+function filterStandards(rows: Record<string, unknown>[], filters: Record<string, unknown> = {}, adminMode = false) {
+  let result = rows.filter(row => adminMode || (truthy(row.Active) && (!clean(row.StatusStandar) || clean(row.StatusStandar).toUpperCase() === 'BERLAKU')));
+  const status = clean(filters.status).toUpperCase();
+  const group = clean(filters.kelompok);
+  const year = Number(filters.tahun) || 0;
+  const query = clean(filters.q).toLowerCase();
+  if (status) result = result.filter(row => clean(row.StatusStandar).toUpperCase() === status);
+  if (group) result = result.filter(row => clean(row.Kelompok) === group);
+  if (year) result = result.filter(row => (!Number(row.TahunBerlakuMulai) || year >= Number(row.TahunBerlakuMulai)) && (!Number(row.TahunBerlakuSampai) || year <= Number(row.TahunBerlakuSampai)));
+  if (query) result = result.filter(row => [row.ItemCode, row.NamaStandar, row.PernyataanStandar, row.Indikator, row.SumberFile, row.Versi].some(value => clean(value).toLowerCase().includes(query)));
+  return result.sort((left, right) => clean(left.ItemCode).localeCompare(clean(right.ItemCode)) || clean(left.Versi).localeCompare(clean(right.Versi), undefined, {numeric: true}));
+}
+
+async function readRpc(name: string, args: unknown[], user: Record<string, unknown>) {
+  if (name === 'getBootstrap' || name === 'getExecutiveDashboard') {
+    const [cycles, audits, standards, prodi, unit, auditors, pimpinan, assignments] = await Promise.all([
+      tableRows('AMI_CYCLE'), tableRows('AMI_AUDITI'), tableRows('MASTER_STANDAR'), tableRows('MASTER_PRODI'),
+      tableRows('MASTER_UNIT'), tableRows('MASTER_AUDITOR'), tableRows('MASTER_PIMPINAN'), tableRows('AMI_STANDARD_ASSIGN'),
+    ]);
+    const visibleAudits = user.Role === 'ADMIN_BPM'
+      ? audits
+      : audits.filter(row => user.Role === 'AUDITI' && clean(row.AuditiType) === clean(user.RefType) && clean(row.AuditiID) === clean(user.RefID));
+    const dashboard = {
+      activeCycleId: clean(cycles.find(row => truthy(row.Active))?.CycleID),
+      totalAudits: visibleAudits.length,
+      finalAudits: visibleAudits.filter(row => clean(row.Status).toUpperCase() === 'FINAL').length,
+      averageProgress: 0,
+      standardCount: standards.filter(row => truthy(row.Active)).length,
+      prodiCount: prodi.filter(row => truthy(row.Active)).length,
+      auditorCount: auditors.filter(row => truthy(row.Active)).length,
+      statusCounts: Object.fromEntries([...new Set(visibleAudits.map(row => clean(row.Status)))].map(status => [status, visibleAudits.filter(row => clean(row.Status) === status).length])),
+      findingCounts: {MENYIMPANG: 0, 'BELUM MENCAPAI': 0, MENCAPAI: 0, MELAMPAUI: 0},
+      resultTotal: 0, fulfilledTotal: 0, overallFulfillmentPct: 0,
+      auditRows: visibleAudits.map(row => ({...row, StandardCount: assignments.filter(item => clean(item.AuditID) === clean(row.AuditID) && truthy(item.Active)).length})),
+      prodiResults: [], standardPerformance: [], reports: 0,
+    };
+    if (name === 'getExecutiveDashboard') return response(dashboard);
+    return response({
+      user: publicUser(user),
+      app: {appName: 'Sistem Audit Mutu Internal (AMI) 2026', orgName: 'Universitas Medan Area', unitName: 'Biro Penjaminan Mutu', version: '1.6.2-supabase'},
+      dashboard,
+      selections: {cycles, prodi, unit, auditors, pimpinan},
+      warnings: [],
+      bootstrapOk: true,
+    });
+  }
+  if (name === 'getImportExportCatalog') return response([]);
+  const adminOnly = ['listMaster', 'listStandardsAdmin', 'listStandards', 'getStandardVersions', 'listUsers', 'listCycles', 'listCycleAudits'];
+  if (adminOnly.includes(name)) {
+    const denied = requireAdmin(user);
+    if (denied) return denied;
+  }
+  if (name === 'listMaster') {
+    const table = masterTables[clean(args[1]).toUpperCase()];
+    if (!table) return response({ error: 'Jenis master tidak dikenali.' }, 400);
+    return response(await tableRows(table));
+  }
+  if (name === 'listUsers') {
+    return response((await tableRows('USERS')).map(row => ({UserID: row.UserID, Username: row.Username, Nama: row.Nama, Role: row.Role, RefType: row.RefType, RefID: row.RefID, Active: truthy(row.Active), ForceChangePassword: truthy(row.ForceChangePassword), LastLogin: row.LastLogin || ''})));
+  }
+  if (name === 'listCycles') return response(await tableRows('AMI_CYCLE'));
+  if (name === 'listStandards' || name === 'listStandardsAdmin') return response(filterStandards(await tableRows('MASTER_STANDAR'), (args[1] || {}) as Record<string, unknown>, name === 'listStandardsAdmin'));
+  if (name === 'getStandardVersions') {
+    const rows = await tableRows('MASTER_STANDAR');
+    const selected = rows.find(row => clean(row.StandardID) === clean(args[1]));
+    if (!selected) return response({ error: 'Standar tidak ditemukan.' }, 404);
+    const family = clean(selected.StandardFamilyID) || `STDFAM-${clean(selected.StandardID)}`;
+    return response(rows.filter(row => (clean(row.StandardFamilyID) || `STDFAM-${clean(row.StandardID)}`) === family));
+  }
+  if (name === 'listCycleAudits') {
+    const audits = await tableRows('AMI_AUDITI');
+    const assignments = await tableRows('AMI_STANDARD_ASSIGN');
+    return response(audits.filter(row => clean(row.CycleID) === clean(args[1])).map(row => ({...row, StandardCount: assignments.filter(item => clean(item.AuditID) === clean(row.AuditID) && truthy(item.Active)).length})));
+  }
+  if (name === 'getAccessibleAudits') {
+    const audits = await tableRows('AMI_AUDITI');
+    const assignments = await tableRows('AMI_STANDARD_ASSIGN');
+    if (user.Role === 'ADMIN_BPM') return response(audits.map(row => ({...row, StandardCount: assignments.filter(item => clean(item.AuditID) === clean(row.AuditID) && truthy(item.Active)).length})));
+    return response(audits.filter(row => user.Role === 'AUDITI' && clean(row.AuditiType) === clean(user.RefType) && clean(row.AuditiID) === clean(user.RefID)));
+  }
+  return null;
+}
+
 async function getSession(token: string, column = 'Token') {
   const { data: sessionData, error: sessionError } = await supabase
     .from('SESSIONS')
@@ -93,6 +197,8 @@ Deno.serve(async request => {
     const args = body.args as unknown[];
     const session = await getSession(String(args[0] || ''), rpcMatch[1] === 'resumeSession' ? 'ResumeKey' : 'Token');
     if (!session) return response({ error: 'Sesi sudah berakhir. Silakan login kembali.' }, 401);
+    const readResult = await readRpc(rpcMatch[1], args, session.user);
+    if (readResult) return readResult;
     if (rpcMatch[1] === 'resumeSession') return response({ ok: true, token: session.session.Token, resumeKey: session.session.ResumeKey, user: publicUser(session.user) });
     if (rpcMatch[1] === 'createResumeKey') return response({ ok: true, resumeKey: session.session.ResumeKey });
     if (rpcMatch[1] === 'logout') {
