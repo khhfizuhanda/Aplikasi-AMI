@@ -45,6 +45,13 @@ const masterTables: Record<string, string> = {
   PIMPINAN: 'MASTER_PIMPINAN',
 };
 
+const masterTypeAliases: Record<string, string> = {
+  PRODI: 'PRODI', MASTER_PRODI: 'PRODI',
+  UNIT: 'UNIT', MASTER_UNIT: 'UNIT',
+  AUDITOR: 'AUDITOR', MASTER_AUDITOR: 'AUDITOR',
+  PIMPINAN: 'PIMPINAN', MASTER_PIMPINAN: 'PIMPINAN',
+};
+
 const importModules: Record<string, {label: string; context: string; admin?: boolean; exportOnly?: boolean; table?: string}> = {
   MASTER_PRODI: {label: 'Master Prodi', context: 'NONE', admin: true, table: 'MASTER_PRODI'},
   MASTER_UNIT: {label: 'Master Unit/Biro', context: 'NONE', admin: true, table: 'MASTER_UNIT'},
@@ -127,10 +134,11 @@ async function writeRpc(name: string, args: unknown[], user: Record<string, unkn
     return response({ok: true, id: input[key]});
   }
   if (name === 'bulkImportMaster') {
-    const type = clean(args[1]).toUpperCase();
+    const requestedType = clean(args[1]).replace(/^['"]|['"]$/g, '').toUpperCase();
+    const type = masterTypeAliases[requestedType];
+    if (!type) return response({error: `Jenis master tidak dikenali: ${requestedType || '(kosong)'}`}, 400);
     const table = masterTables[type];
-    if (!table) return response({error: 'Jenis master tidak dikenali.'}, 400);
-    const lines = String(args[2] || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const lines = String(args[2] || '').replace(/^\uFEFF/, '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
     const keys: Record<string, string> = {PRODI: 'ProdiID', UNIT: 'UnitID', AUDITOR: 'AuditorID', PIMPINAN: 'PimpinanID'};
     const key = keys[type];
     let inserted = 0;
@@ -142,6 +150,8 @@ async function writeRpc(name: string, args: unknown[], user: Record<string, unkn
     for (const [index, line] of lines.entries()) {
       const columns = line.split('\t').map(clean);
       try {
+      const first = columns[0].toUpperCase();
+      if ((type === 'PRODI' && first === 'KODEPRODI') || (type === 'UNIT' && first === 'KODEUNIT') || (type === 'AUDITOR' && (first === 'NIDN_NIK' || first === 'NIDN/NIK')) || (type === 'PIMPINAN' && first === 'NAMA')) continue;
         let record: Record<string, unknown>;
         let existing: Record<string, unknown> | undefined;
         if (type === 'PRODI') {
