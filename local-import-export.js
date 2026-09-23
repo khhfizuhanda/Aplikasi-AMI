@@ -1,0 +1,210 @@
+const crypto = require('node:crypto');
+const XLSX = require('xlsx');
+
+const MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const MAX_BYTES = 15 * 1024 * 1024;
+const jobs = new Map();
+const CAPAIAN = ['MENYIMPANG', 'BELUM MENCAPAI', 'MENCAPAI', 'MELAMPAUI'];
+const AUDIT_ROLES = {
+  EVALUASI_DIRI: 'AUDITI', TINDAK_LANJ: 'AUDITI', DESK_EVALUATION: 'AUDITOR',
+  VISITASI: 'AUDITOR', FORM2: 'AUDITOR', FORM3: 'AUDITOR', HASIL_AUDIT: 'AUDITOR'
+};
+const MODULES = {
+  MASTER_PRODI: ['KodeProdi','NamaProdi','Fakultas','Jenjang','Kaprodi','NIDN','Active'],
+  MASTER_UNIT: ['KodeUnit','NamaUnit','JenisUnit','Pimpinan','Active'],
+  MASTER_AUDITOR: ['NIDN_NIK','Nama','Unit','Sertifikasi','Active'],
+  MASTER_PIMPINAN: ['Nama','Jabatan','Level','AreaAkses','Active'],
+  MASTER_STANDAR: ['ItemCode','Kelompok','KodeKelompokStandar','NamaStandar','NoSumber','PernyataanStandar','StrategiPencapaian','Indikator','TahunBerlakuMulai','Versi','StatusStandar','SumberFile','TahunSumber','HalamanPDFMulai','HalamanPDFAkhir','Notes'],
+  SIKLUS: ['NamaSiklus','Tahun','TahunAkademik','TanggalMulai','BatasEvaluasiDiri','DeskStart','DeskEnd','VisitStart','VisitEnd','Status','Active'],
+  PENETAPAN_STANDAR: ['AuditiType','KodeAuditi','NamaAuditi','ItemCode','VersiStandar','Active'],
+  TIM_AUDITOR: ['AuditiType','KodeAuditi','NamaAuditi','LeadNIDN_NIK','Anggota1NIDN_NIK','Anggota2NIDN_NIK'],
+  EVALUASI_DIRI: ['ItemCode','VersiStandar','NamaStandar','PernyataanStandar','Indikator','Capaian','NilaiAktual','EvaluasiDiri','Akibat','AkarPenyebab','TanggapanAuditi','RencanaPerbaikan','JadwalPerbaikan','PJPerbaikan','RencanaPencegahan','JadwalPencegahan','PJPencegahan','FaktorPendukung','RekomendasiPeningkatanIndikator','LinkBukti1','NamaBukti1','LinkBukti2','NamaBukti2','LinkBukti3','NamaBukti3','LinkBukti4','NamaBukti4','LinkBukti5','NamaBukti5'],
+  DESK_EVALUATION: ['ItemCode','VersiStandar','NamaStandar','PernyataanStandar','Indikator','CapaianAuditi','NilaiAktualAuditi','EvaluasiDiriAuditi','AkibatAuditi','AkarPenyebabAuditi','TanggapanAuditiAwal','RencanaPerbaikanAwal','JadwalPerbaikanAwal','PJPerbaikanAwal','RencanaPencegahanAwal','JadwalPencegahanAwal','PJPencegahanAwal','FaktorPendukungAuditi','RekomendasiPeningkatanAuditi','StatusDesk','CatatanDesk','ButuhVisitasi'],
+  VISITASI: ['Tanggal','JamMulai','JamSelesai','Lokasi','WakilAuditi','CatatanUmum'],
+  FORM2: ['ProgramNo','NomorStandar','NamaStandar','TentatifAuditObjektif','TujuanAudit','LangkahNo','UraianLangkah','Estimasi','NoPernyataan','Realisasi','InisialAuditor'],
+  FORM3: ['CatatanNo','Catatan','Tanggal','ReferensiNo','DokumenRef'],
+  HASIL_AUDIT: ['ItemCode','VersiStandar','NamaStandar','PernyataanStandar','Indikator','StatusDesk','CatatanDesk','ButuhVisitasi','CapaianAuditi','NilaiAktualAuditi','EvaluasiDiriAuditi','Kategori','Deskripsi','Kriteria','Akibat','AkarPenyebab','Rekomendasi','TanggapanAuditi','RencanaPerbaikan','JadwalPerbaikan','PJPerbaikan','RencanaPencegahan','JadwalPencegahan','PJPencegahan','FaktorPendukung','RekomendasiPeningkatanIndikator'],
+  TINDAK_LANJ: ['ItemCode','VersiStandar','NamaStandar','Kategori','Deskripsi','TanggapanAuditi','RencanaPerbaikan','JadwalPerbaikan','PJPerbaikan','RencanaPencegahan','JadwalPencegahan','PJPencegahan'],
+  AUDIT_LOG: ['Timestamp','Nama','Role','Action','Module','AuditID','RecordID','BeforeJSON','AfterJSON'],
+  ERROR_LOG: ['Timestamp','Username','Role','FunctionName','Message','Stack','ContextJSON'],
+  AUDIT_REKAP: []
+};
+const EXPORT_ONLY = new Set(['AUDIT_LOG', 'ERROR_LOG']);
+const TABLES = {MASTER_PRODI:'MASTER_PRODI', MASTER_UNIT:'MASTER_UNIT', MASTER_AUDITOR:'MASTER_AUDITOR', MASTER_PIMPINAN:'MASTER_PIMPINAN', MASTER_STANDAR:'MASTER_STANDAR', SIKLUS:'AMI_CYCLE', AUDIT_LOG:'AUDIT_LOG', ERROR_LOG:'SYSTEM_ERROR_LOG'};
+const q = value => '"' + String(value).replace(/"/g, '""') + '"';
+const table = (schema, name) => `${q(schema)}.${q(name)}`;
+const text = value => String(value == null ? '' : value).trim();
+const upper = value => text(value).toUpperCase();
+const yes = value => ['IYA','YA','YES','TRUE','1','AKTIF'].includes(upper(value));
+const id = prefix => `${prefix}-${crypto.randomUUID()}`;
+const norm = value => upper(value).replace(/[^A-Z0-9]/g, '');
+const get = (row, key) => {
+  const exact = Object.keys(row).find(k => norm(k) === norm(key));
+  return exact ? row[exact] : '';
+};
+const def = module => {
+  const key = upper(module);
+  if (!MODULES[key]) throw new Error(`Modul Import/Export tidak dikenali: ${key}`);
+  return key;
+};
+
+function assertAccess(user, module, context, rows) {
+  const role = upper(user.Role);
+  if (EXPORT_ONLY.has(module) && role !== 'ADMIN_BPM') throw new Error('Modul ini hanya untuk Admin BPM.');
+  if (['MASTER_PRODI','MASTER_UNIT','MASTER_AUDITOR','MASTER_PIMPINAN','MASTER_STANDAR','SIKLUS'].includes(module) && role !== 'ADMIN_BPM') throw new Error('Hanya Admin BPM yang dapat menggunakan modul ini.');
+  if (['PENETAPAN_STANDAR','TIM_AUDITOR'].includes(module) && role !== 'ADMIN_BPM') throw new Error('Hanya Admin BPM yang dapat menggunakan modul ini.');
+  const required = AUDIT_ROLES[module];
+  if (required && role !== required && role !== 'ADMIN_BPM' && role !== 'PIMPINAN') throw new Error(`Import modul ini hanya dapat dilakukan oleh ${required}.`);
+  if (required || module === 'AUDIT_REKAP') {
+    const auditId = text(context && context.auditId);
+    const audit = rows.AMI_AUDITI.find(x => text(x.AuditID) === auditId);
+    if (!audit) throw new Error('Audit tidak ditemukan.');
+    const accessible = role === 'ADMIN_BPM' || role === 'PIMPINAN' || (role === 'AUDITI' && text(audit.AuditiType) === text(user.RefType) && text(audit.AuditiID) === text(user.RefID)) || (role === 'AUDITOR' && rows.AMI_TEAM.some(t => text(t.AuditID) === auditId && [t.LeadAuditorID,t.Member1ID,t.Member2ID].map(text).includes(text(user.RefID))));
+    if (!accessible) throw new Error('Anda tidak memiliki akses ke audit tersebut.');
+    return audit;
+  }
+  if (['PENETAPAN_STANDAR','TIM_AUDITOR'].includes(module) && !text(context && context.cycleId)) throw new Error('Pilih siklus AMI terlebih dahulu.');
+}
+
+async function snapshot(pool, schema) {
+  const names = [...new Set([...Object.values(TABLES), 'AMI_AUDITI','AMI_STANDARD_ASSIGN','AMI_TEAM','SELF_EVAL','SELF_FOLLOW_UP','EVIDENCE','DESK_EVAL','VISIT','FORM2_PROGRAM_KERJA','FORM3_CATATAN','FINDINGS','AMI_IMPROVEMENT'])];
+  const result = await Promise.all(names.map(name => pool.query(`SELECT * FROM ${table(schema, name)}`)));
+  return Object.fromEntries(names.map((name, i) => [name, result[i].rows]));
+}
+function rowForModule(module, row, data) {
+  return MODULES[module].map(c => c === 'AreaAkses' ? (row.AccessName || row.AccessID || '') : (row[c] == null ? '' : row[c]));
+}
+function exportRows(module, context, data) {
+  const names = TABLES[module];
+  if (names) return (data[names] || []).map(row => rowForModule(module, row, data));
+  if (module === 'PENETAPAN_STANDAR') return (data.AMI_STANDARD_ASSIGN || []).filter(a => yes(a.Active) && (data.AMI_AUDITI || []).some(x => text(x.AuditID) === text(a.AuditID) && text(x.CycleID) === text(context.cycleId))).map(a => { const audit = data.AMI_AUDITI.find(x => x.AuditID === a.AuditID) || {}; return [audit.AuditiType, audit.AuditiID, audit.AuditiName, a.ItemCode, a.VersiStandarSnapshot || '1.0', yes(a.Active) ? 'IYA' : 'TIDAK']; });
+  if (module === 'TIM_AUDITOR') return (data.AMI_AUDITI || []).filter(a => text(a.CycleID) === text(context.cycleId)).map(a => { const t = (data.AMI_TEAM || []).find(x => x.AuditID === a.AuditID) || {}; const find = aid => ((data.MASTER_AUDITOR || []).find(x => x.AuditorID === aid) || {}).NIDN_NIK || ''; return [a.AuditiType,a.AuditiID,a.AuditiName,find(t.LeadAuditorID),find(t.Member1ID),find(t.Member2ID)]; });
+  if (AUDIT_ROLES[module]) return auditRows(module, context.auditId, data);
+  if (module === 'AUDIT_REKAP') return ['EVALUASI_DIRI','DESK_EVALUATION','VISITASI','FORM2','FORM3','HASIL_AUDIT','TINDAK_LANJ'].flatMap(name => auditRows(name, context.auditId, data));
+  throw new Error('Modul export belum didukung.');
+}
+function auditRows(module, auditId, d) {
+  const assigns = (d.AMI_STANDARD_ASSIGN || []).filter(a => text(a.AuditID) === text(auditId) && yes(a.Active));
+  const std = a => (d.MASTER_STANDAR || []).find(s => s.StandardID === a.StandardID) || {};
+  const self = a => (d.SELF_EVAL || []).find(x => x.AssignID === a.AssignID) || {};
+  if (module === 'VISITASI') { const v = (d.VISIT || []).find(x => x.AuditID === auditId) || {}; return [MODULES[module].map(c => v[c] || '')]; }
+  if (module === 'FORM2') {
+    const form = (d.FORM2_PROGRAM_KERJA || []).find(x => text(x.AuditID) === text(auditId)) || {};
+    let programs = []; try { programs = JSON.parse(form.LangkahJSON || '[]'); } catch (_) { programs = []; }
+    return programs.flatMap((program, programIndex) => {
+      const steps = Array.isArray(program.langkahKerja) ? program.langkahKerja : [];
+      const sourceSteps = steps.length ? steps : [{}];
+      return sourceSteps.map((step, stepIndex) => [
+        program.programNo || programIndex + 1, program.nomorStandar || '', program.namaStandar || '',
+        program.tentatifAuditObjektif || '', program.tujuanAudit || '', step.langkahNo || stepIndex + 1,
+        step.uraian || '', step.estimasi || '', step.noPernyataan || '', step.realisasi || '', step.inisialAuditor || ''
+      ]);
+    });
+  }
+  if (module === 'FORM3') {
+    const form = (d.FORM3_CATATAN || []).find(x => text(x.AuditID) === text(auditId)) || {};
+    let notes = []; try { notes = JSON.parse(form.CatatanJSON || '[]'); } catch (_) { notes = []; }
+    return notes.flatMap((note, noteIndex) => {
+      const refs = Array.isArray(note.dokumenReferensi) ? note.dokumenReferensi : [];
+      const sourceRefs = refs.length ? refs : [{}];
+      return sourceRefs.map((ref, refIndex) => [
+        note.catatanNo || noteIndex + 1, note.catatan || '', note.tanggal || '',
+        ref.referensiNo || refIndex + 1, ref.dokumenRef || ''
+      ]);
+    });
+  }
+  return assigns.map(a => {
+    const s=std(a), se=self(a), desk=(d.DESK_EVAL||[]).find(x=>x.AssignID===a.AssignID)||{}, finding=(d.FINDINGS||[]).find(x=>x.AssignID===a.AssignID)||{};
+    const base={ItemCode:a.ItemCode||s.ItemCode,VersiStandar:s.Versi||a.VersiStandarSnapshot||'1.0',NamaStandar:a.NamaStandar||s.NamaStandar,PernyataanStandar:a.PernyataanStandarSnapshot||s.PernyataanStandar,Indikator:a.IndikatorSnapshot||s.Indikator,Capaian:se.Capaian,NilaiAktual:se.NilaiCapaian,EvaluasiDiri:se.EvaluasiDiri,StatusDesk:desk.StatusDesk,CatatanDesk:desk.CatatanDesk,ButuhVisitasi:yes(desk.ButuhVisitasi)?'IYA':'TIDAK',Kategori:finding.Kategori,Deskripsi:finding.Deskripsi,Kriteria:finding.Kriteria,Akibat:finding.Akibat,AkarPenyebab:finding.AkarPenyebab,Rekomendasi:finding.Rekomendasi};
+    return MODULES[module].map(c => base[c] == null ? '' : base[c]);
+  });
+}
+async function readRows(pool, schema, module, context) {
+  const data = await snapshot(pool, schema); assertAccess({Role:'ADMIN_BPM'}, module, context, data); return {data, rows:exportRows(module, context || {}, data)};
+}
+
+async function exportXlsxModule(pool, schema, user, module, context = {}) {
+  const key = def(module), data = await snapshot(pool, schema); assertAccess(user, key, context, data);
+  const rows = exportRows(key, context, data), wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet([MODULES[key].length ? MODULES[key] : ['AuditID','Module','Data'], ...rows]); XLSX.utils.book_append_sheet(wb, ws, 'DATA');
+  const note = XLSX.utils.aoa_to_sheet([['MODUL', key], ['IMPORT', 'Validasi dilakukan sebelum commit.']]); XLSX.utils.book_append_sheet(wb, note, 'PETUNJUK');
+  const base64 = XLSX.write(wb, {type:'base64', bookType:'xlsx'});
+  return {fileName:`AMI_${key}_${new Date().toISOString().slice(0,16).replace(/[-:T]/g,'')}.xlsx`, mimeType:MIME, base64};
+}
+function validateRows(module, context, headers, rows, data) {
+  const required = MODULES[module], normalized = headers.map(norm), missing = required.filter(x => !normalized.includes(norm(x)));
+  if (missing.length) throw new Error(`Header XLSX kurang: ${missing.join(', ')}. Gunakan file hasil Export dari aplikasi.`);
+  const errors=[], preview=[], validRows=[];
+  rows.forEach((row, index) => { const e=[]; const c=n => text(get(row,n)), u=n=>upper(get(row,n)); const requiredFields={MASTER_PRODI:['NamaProdi','Jenjang'],MASTER_UNIT:['NamaUnit','JenisUnit'],MASTER_AUDITOR:['NIDN_NIK','Nama','Sertifikasi'],MASTER_PIMPINAN:['Nama','Level'],MASTER_STANDAR:['ItemCode','NamaStandar','PernyataanStandar','Indikator','StatusStandar'],SIKLUS:['NamaSiklus','Tahun']}; (requiredFields[module]||[]).forEach(field=>{if(!c(field))e.push(`${field} wajib`);}); if (module==='MASTER_PRODI' && !['S1','S2','S3'].includes(u('Jenjang'))) e.push('Jenjang harus S1/S2/S3'); if (module==='MASTER_AUDITOR' && !['IYA','TIDAK'].includes(u('Sertifikasi'))) e.push('Sertifikasi IYA/TIDAK'); if (['EVALUASI_DIRI','HASIL_AUDIT'].includes(module) && !CAPAIAN.includes(u(module === 'HASIL_AUDIT' ? 'Kategori' : 'Capaian')) && c(module === 'HASIL_AUDIT' ? 'Kategori' : 'Capaian')) e.push('Capaian tidak valid'); if (['EVALUASI_DIRI','HASIL_AUDIT'].includes(module)) for (let i=1;i<=5;i++) if (c(`LinkBukti${i}`) && !/^https?:\/\//i.test(c(`LinkBukti${i}`))) e.push(`LinkBukti${i} harus http/https`); const item={row:index+2,ok:e.length===0,errors:e.join(' | '),data:Object.fromEntries(required.slice(0,8).map(k=>[k,c(k)]))}; preview.push(item); if (e.length) { if (errors.length < 50) errors.push(`Baris ${index+2}: ${e.join(' | ')}`); } else validRows.push(row); });
+  return {total:rows.length,valid:validRows.length,invalid:rows.length-validRows.length,preview:preview.slice(0,100),errors,validRows};
+}
+async function validateImportXlsx(pool, schema, user, module, context, fileName, mimeType, base64) {
+  const key=def(module), data=await snapshot(pool,schema); assertAccess(user,key,context,data); if(EXPORT_ONLY.has(key)) throw new Error('Modul ini hanya dapat diekspor.');
+  const bytes=Buffer.from(String(base64||'').replace(/^data:[^,]+,/,'').trim(),'base64'); if (!bytes.length) throw new Error('File XLSX kosong.'); if(bytes.length>MAX_BYTES) throw new Error('Ukuran XLSX maksimal 15 MB.');
+  const wb=XLSX.read(bytes,{type:'buffer',cellDates:false}), sheet=wb.Sheets.DATA || wb.Sheets[wb.SheetNames[0]]; if(!sheet) throw new Error('File XLSX kosong.');
+  const matrix=XLSX.utils.sheet_to_json(sheet,{header:1,defval:''}); const headers=(matrix.shift()||[]).map(text); const rows=matrix.filter(r=>r.some(v=>text(v))).map(r=>Object.fromEntries(headers.map((h,i)=>[h,r[i] == null ? '' : r[i]]))); const result=validateRows(key,context,headers,rows,data); const importToken=crypto.randomUUID(); jobs.set(importToken,{userId:user.UserID,module:key,context,headers,rows,data,created:Date.now()});
+  return {importToken,module:key,total:result.total,valid:result.valid,invalid:result.invalid,preview:result.preview,errors:result.errors,fileName};
+}
+function updateMap(rows, keys, incoming) { return rows.find(r => keys.every(k => text(r[k]) === text(incoming[k]))); }
+function parseJsonArray(value) { try { const parsed = JSON.parse(value || '[]'); return Array.isArray(parsed) ? parsed : []; } catch (_) { return []; } }
+function assignmentFor(data, auditId, row) {
+  const itemCode = upper(get(row, 'ItemCode'));
+  const version = text(get(row, 'VersiStandar') || '1.0');
+  return (data.AMI_STANDARD_ASSIGN || []).find(a => text(a.AuditID) === text(auditId) && yes(a.Active) && upper(a.ItemCode) === itemCode && text(a.VersiStandarSnapshot || '1.0') === version);
+}
+function existingBy(rows, keys, record) { return (rows || []).find(row => keys.every(key => text(row[key]) === text(record[key]))); }
+function incomingOr(value, previous, fallback = '') { return value !== '' ? value : (text(previous) || text(fallback)); }
+function buildPrograms(data, auditId, rows) {
+  const old = (data.FORM2_PROGRAM_KERJA || []).find(x => text(x.AuditID) === text(auditId)) || {};
+  const programs = parseJsonArray(old.LangkahJSON).map(program => ({...program, langkahKerja:Array.isArray(program.langkahKerja) ? [...program.langkahKerja] : []}));
+  const byNo = new Map(programs.map((program, index) => [text(program.programNo || index + 1), program]));
+  (Array.isArray(rows) ? rows : [rows]).forEach((row, index) => {
+    const no = text(get(row, 'ProgramNo')) || String(index + 1);
+    let program = byNo.get(no);
+    if (!program) { program = {rowId:`XLSX_F2_${no}`,programNo:no,nomorStandar:'',namaStandar:'',tentatifAuditObjektif:'',tujuanAudit:'',langkahKerja:[]}; programs.push(program); byNo.set(no, program); }
+    ['NomorStandar','NamaStandar','TentatifAuditObjektif','TujuanAudit'].forEach(field => { if (text(get(row, field))) program[{NomorStandar:'nomorStandar',NamaStandar:'namaStandar',TentatifAuditObjektif:'tentatifAuditObjektif',TujuanAudit:'tujuanAudit'}[field]] = text(get(row, field)); });
+    if (['UraianLangkah','Estimasi','NoPernyataan','Realisasi','InisialAuditor'].some(field => text(get(row, field)))) {
+      const stepNo = text(get(row, 'LangkahNo')) || String(program.langkahKerja.length + 1);
+      const existing = program.langkahKerja.find(step => text(step.langkahNo) === stepNo);
+      const step = {rowId:`XLSX_F2L_${no}_${stepNo}`,langkahNo:stepNo,uraian:text(get(row,'UraianLangkah')),estimasi:text(get(row,'Estimasi')),noPernyataan:text(get(row,'NoPernyataan')),realisasi:text(get(row,'Realisasi')),inisialAuditor:text(get(row,'InisialAuditor'))};
+      if (existing) Object.assign(existing, step); else program.langkahKerja.push(step);
+    }
+  });
+  return programs;
+}
+function buildNotes(data, auditId, rows) {
+  const old = (data.FORM3_CATATAN || []).find(x => text(x.AuditID) === text(auditId)) || {};
+  const notes = parseJsonArray(old.CatatanJSON).map(note => ({...note,dokumenReferensi:Array.isArray(note.dokumenReferensi) ? [...note.dokumenReferensi] : []}));
+  const byNo = new Map(notes.map((note, index) => [text(note.catatanNo || index + 1), note]));
+  (Array.isArray(rows) ? rows : [rows]).forEach((row, index) => {
+    const no = text(get(row, 'CatatanNo')) || String(index + 1);
+    let note = byNo.get(no);
+    if (!note) { note = {rowId:`XLSX_F3_${no}`,catatanNo:no,catatan:'',tanggal:'',dokumenReferensi:[]}; notes.push(note); byNo.set(no, note); }
+    if (text(get(row, 'Catatan'))) note.catatan = text(get(row, 'Catatan'));
+    if (text(get(row, 'Tanggal'))) note.tanggal = text(get(row, 'Tanggal'));
+    const reference = text(get(row, 'DokumenRef'));
+    if (reference) { const refNo = text(get(row, 'ReferensiNo')) || String(note.dokumenReferensi.length + 1); const ref = {rowId:`XLSX_F3R_${no}_${refNo}`,referensiNo:refNo,dokumenRef:reference}; const existing = note.dokumenReferensi.find(item => text(item.referensiNo) === refNo); if (existing) Object.assign(existing, ref); else note.dokumenReferensi.push(ref); }
+  });
+  return notes;
+}
+async function commitImportXlsx(pool, schema, user, importToken) {
+  const job=jobs.get(importToken); if(!job) throw new Error('Sesi import sudah kedaluwarsa. Validasi file kembali.'); if(job.userId !== user.UserID) throw new Error('Sesi import bukan milik pengguna ini.');
+  const client=await pool.connect(); const result={ok:true,module:job.module,context:job.context,total:job.rows.length,imported:0,updated:0,skipped:0,invalid:0,errors:[],touchedAssignIds:[]};
+  try { await client.query('BEGIN'); const data=await snapshot({query:(sql,args)=>client.query(sql,args)},schema); const checked=validateRows(job.module,job.context,job.headers,job.rows,data); result.invalid=checked.invalid; result.errors=checked.errors; if (job.module === 'FORM2' || job.module === 'FORM3') { const r=await applyRow(client,schema,job.module,job.context,checked.validRows,user,data); result[r.mode]++; } else for(const row of checked.validRows) { const r=await applyRow(client,schema,job.module,job.context,row,user,data); result[r.mode]++; if(r.assignId && !result.touchedAssignIds.includes(r.assignId)) result.touchedAssignIds.push(r.assignId); } await client.query('COMMIT'); return result; } catch(e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); jobs.delete(importToken); }
+}
+async function upsert(client,schema,name,keys,record) { const existing=(await client.query(`SELECT * FROM ${table(schema,name)}`)).rows.find(row=>keys.every(k=>text(row[k])===text(record[k]))); const fields=Object.keys(record); if(existing) { const sets=fields.map((f,i)=>`${q(f)}=$${i+1}`).join(','); await client.query(`UPDATE ${table(schema,name)} SET ${sets} WHERE ${keys.map((k,i)=>`${q(k)}=$${fields.indexOf(k)+1}`).join(' AND ')}`,fields.map(f=>record[f])); return 'updated'; } const values=fields.map(f=>record[f]); await client.query(`INSERT INTO ${table(schema,name)} (${fields.map(q).join(',')}) VALUES (${values.map((_,i)=>`$${i+1}`).join(',')})`,values); return 'imported'; }
+async function applyRow(client,schema,module,context,row,user,data) {
+  const value=k=>text(get(row,k)), now=new Date().toISOString();
+  if (TABLES[module]) { const name=TABLES[module], prefix={MASTER_PRODI:'ProdiID',MASTER_UNIT:'UnitID',MASTER_AUDITOR:'AuditorID',MASTER_PIMPINAN:'PimpinanID',MASTER_STANDAR:'StandardID',SIKLUS:'CycleID'}[module]; const record=Object.fromEntries(MODULES[module].map(k=>[k==='AreaAkses'?'AccessName':k,k==='Active'?String(yes(get(row,k))):value(k)])); if(prefix) record[prefix]=((data[name]||[]).find(x=>text(x[prefix])===text(value(prefix)) || (module==='MASTER_PRODI'&&upper(x.KodeProdi)===upper(value('KodeProdi'))) || (module==='MASTER_UNIT'&&upper(x.KodeUnit)===upper(value('KodeUnit'))) || (module==='MASTER_AUDITOR'&&upper(x.NIDN_NIK)===upper(value('NIDN_NIK'))) || (module==='MASTER_PIMPINAN'&&upper(x.Nama)===upper(value('Nama')) && upper(x.Jabatan)===upper(value('Jabatan'))) || (module==='MASTER_STANDAR'&&upper(x.ItemCode)===upper(value('ItemCode'))&&text(x.Versi||'1.0')===text(value('Versi')||'1.0')) || (module==='SIKLUS'&&upper(x.NamaSiklus)===upper(value('NamaSiklus'))&&text(x.Tahun)===text(value('Tahun'))))||{})[prefix] || id(prefix.replace('ID','').toUpperCase()); record.CreatedAt=now; record.UpdatedAt=now; return {mode:await upsert(client,schema,name,[prefix],record)}; }
+  const audit=(data.AMI_AUDITI||[]).find(x=>text(x.AuditID)===text(context.auditId)); if(module==='PENETAPAN_STANDAR'||module==='TIM_AUDITOR') { const ref=(data.AMI_AUDITI||[]).find(x=>text(x.CycleID)===text(context.cycleId)&&upper(x.AuditiType)===upper(value('AuditiType'))&&(text(x.AuditiID)===value('KodeAuditi')||upper(x.AuditiName)===upper(value('NamaAuditi')))); if(!ref) return {mode:'skipped'}; if(module==='TIM_AUDITOR') { const find=a=>(data.MASTER_AUDITOR||[]).find(x=>upper(x.NIDN_NIK)===upper(value(a))); return {mode:await upsert(client,schema,'AMI_TEAM',['AuditID'],{TeamID:id('TEAM'),AuditID:ref.AuditID,LeadAuditorID:(find('LeadNIDN_NIK')||{}).AuditorID||'',Member1ID:(find('Anggota1NIDN_NIK')||{}).AuditorID||'',Member2ID:(find('Anggota2NIDN_NIK')||{}).AuditorID||'',AssignedAt:now,AssignedBy:user.Nama,UpdatedAt:now})}; } const standard=(data.MASTER_STANDAR||[]).find(x=>upper(x.ItemCode)===upper(value('ItemCode'))&&text(x.Versi||'1.0')===text(value('VersiStandar')||'1.0')); if(!standard) return {mode:'skipped'}; return {mode:await upsert(client,schema,'AMI_STANDARD_ASSIGN',['AuditID','StandardID'],{AssignID:id('ASN'),AuditID:ref.AuditID,StandardID:standard.StandardID,ItemCode:standard.ItemCode,NamaStandar:standard.NamaStandar,Active:String(yes(get(row,'Active'))),AssignedAt:now,AssignedBy:user.Nama,VersiStandarSnapshot:standard.Versi||'1.0'}),assignId:''}; }
+  if(!audit) throw new Error('Audit tidak ditemukan.'); if(module==='EVALUASI_DIRI') { const a=assignmentFor(data,audit.AuditID,row); if(!a) return {mode:'skipped'}; const old=(data.SELF_EVAL||[]).find(x=>x.AssignID===a.AssignID); const record={SelfEvalID:old?.SelfEvalID||id('SE'),AuditID:audit.AuditID,AssignID:a.AssignID,StandardID:a.StandardID,Capaian:upper(value('Capaian')),NilaiCapaian:value('NilaiAktual'),EvaluasiDiri:value('EvaluasiDiri'),Akibat:value('Akibat'),AkarPenyebab:value('AkarPenyebab'),Status:'DRAFT',BuktiCount:old?.BuktiCount||'0',SavedAt:now,SubmittedAt:old?.SubmittedAt||'',SubmittedBy:old?.SubmittedBy||''}; return {mode:await upsert(client,schema,'SELF_EVAL',['AssignID'],record),assignId:a.AssignID}; }
+  if(module==='VISITASI') return {mode:await upsert(client,schema,'VISIT',['AuditID'],{VisitID:id('VISIT'),AuditID:audit.AuditID,Tanggal:value('Tanggal'),JamMulai:value('JamMulai'),JamSelesai:value('JamSelesai'),Lokasi:value('Lokasi'),WakilAuditi:value('WakilAuditi'),CatatanUmum:value('CatatanUmum'),Status:'DRAFT',UpdatedAt:now})};
+  if(module==='DESK_EVALUATION') { const a=assignmentFor(data,audit.AuditID,row); if(!a) return {mode:'skipped'}; const old=existingBy(data.DESK_EVAL,['AuditID','AssignID'],{AuditID:audit.AuditID,AssignID:a.AssignID})||{}; return {mode:await upsert(client,schema,'DESK_EVAL',['AuditID','AssignID'],{DeskID:old.DeskID||id('DESK'),AuditID:audit.AuditID,AssignID:a.AssignID,StandardID:a.StandardID,StatusDesk:upper(value('StatusDesk')),CatatanDesk:value('CatatanDesk'),ButuhVisitasi:String(yes(get(row,'ButuhVisitasi'))),AuditorID:old.AuditorID||user.RefID,UpdatedAt:now}),assignId:a.AssignID}; }
+  if(module==='FORM2') { const old=(data.FORM2_PROGRAM_KERJA||[]).find(x=>text(x.AuditID)===text(audit.AuditID))||{}; const programs=buildPrograms(data, audit.AuditID, row); return {mode:await upsert(client,schema,'FORM2_PROGRAM_KERJA',['AuditID'],{Form2ID:old.Form2ID||id('F2'),AuditID:audit.AuditID,TentatifAuditObjektif:programs.map(x=>x.tentatifAuditObjektif).filter(Boolean).filter((x,i,a)=>a.indexOf(x)===i).join('\n'),TujuanAudit:programs.map(x=>x.tujuanAudit).filter(Boolean).filter((x,i,a)=>a.indexOf(x)===i).join('\n'),LangkahJSON:JSON.stringify(programs),UpdatedAt:now,UpdatedBy:user.Nama})}; }
+  if(module==='FORM3') { const old=(data.FORM3_CATATAN||[]).find(x=>text(x.AuditID)===text(audit.AuditID))||{}; const notes=buildNotes(data, audit.AuditID, row); return {mode:await upsert(client,schema,'FORM3_CATATAN',['AuditID'],{Form3ID:old.Form3ID||id('F3'),AuditID:audit.AuditID,CatatanJSON:JSON.stringify(notes),UpdatedAt:now,UpdatedBy:user.Nama})}; }
+  if(module==='HASIL_AUDIT') { const a=assignmentFor(data,audit.AuditID,row); if(!a) return {mode:'skipped'}; const old=existingBy(data.FINDINGS,['AuditID','AssignID'],{AuditID:audit.AuditID,AssignID:a.AssignID})||{}, self=(data.SELF_EVAL||[]).find(x=>x.AssignID===a.AssignID)||{}, follow=(data.SELF_FOLLOW_UP||[]).find(x=>x.AssignID===a.AssignID)||{}, category=upper(value('Kategori')), negative=['MENYIMPANG','BELUM MENCAPAI'].includes(category), positive=['MENCAPAI','MELAMPAUI'].includes(category); const finding={FindingID:old.FindingID||id('FND'),AuditID:audit.AuditID,AssignID:a.AssignID,StandardID:a.StandardID,Kategori:category,Deskripsi:negative?incomingOr(value('Deskripsi'),old.Deskripsi,self.EvaluasiDiri):value('Deskripsi'),Kriteria:incomingOr(value('Kriteria'),old.Kriteria,a.PernyataanStandarSnapshot),Akibat:negative?incomingOr(value('Akibat'),old.Akibat,self.Akibat):value('Akibat'),AkarPenyebab:negative?incomingOr(value('AkarPenyebab'),old.AkarPenyebab,self.AkarPenyebab):value('AkarPenyebab'),Rekomendasi:value('Rekomendasi'),TanggapanAuditi:negative?incomingOr(value('TanggapanAuditi'),old.TanggapanAuditi,follow.TanggapanAuditi):'',RencanaPerbaikan:negative?incomingOr(value('RencanaPerbaikan'),old.RencanaPerbaikan,follow.RencanaPerbaikan):'',JadwalPerbaikan:negative?incomingOr(value('JadwalPerbaikan'),old.JadwalPerbaikan,follow.JadwalPerbaikan):'',PJPerbaikan:negative?incomingOr(value('PJPerbaikan'),old.PJPerbaikan,follow.PJPerbaikan):'',RencanaPencegahan:negative?incomingOr(value('RencanaPencegahan'),old.RencanaPencegahan,follow.RencanaPencegahan):'',JadwalPencegahan:negative?incomingOr(value('JadwalPencegahan'),old.JadwalPencegahan,follow.JadwalPencegahan):'',PJPencegahan:negative?incomingOr(value('PJPencegahan'),old.PJPencegahan,follow.PJPencegahan):'',CreatedAt:old.CreatedAt||now,CreatedBy:old.CreatedBy||user.Nama,UpdatedAt:now,UpdatedBy:user.Nama}; const mode=await upsert(client,schema,'FINDINGS',['AuditID','AssignID'],finding); const impOld=existingBy(data.AMI_IMPROVEMENT,['AuditID','AssignID'],{AuditID:audit.AuditID,AssignID:a.AssignID})||{}; await upsert(client,schema,'AMI_IMPROVEMENT',['AuditID','AssignID'],{ImprovementID:impOld.ImprovementID||id('IMP'),AuditID:audit.AuditID,AssignID:a.AssignID,StandardID:a.StandardID,SelfEvalID:impOld.SelfEvalID||self.SelfEvalID||'',CapaianAwal:impOld.CapaianAwal||self.Capaian||'',KategoriFinal:category,FaktorPendukung:positive?value('FaktorPendukung'):impOld.FaktorPendukung||'',RekomendasiPeningkatanIndikator:positive?value('RekomendasiPeningkatanIndikator'):impOld.RekomendasiPeningkatanIndikator||'',Status:positive?'DIISI AUDITOR':'TIDAK DIPERLUKAN',SavedAt:impOld.SavedAt||now,SavedBy:impOld.SavedBy||user.Nama,UpdatedAt:now,UpdatedBy:user.Nama}); return {mode,assignId:a.AssignID}; }
+  if(module==='TINDAK_LANJ') { const a=assignmentFor(data,audit.AuditID,row); if(!a) return {mode:'skipped'}; const old=existingBy(data.FINDINGS,['AuditID','AssignID'],{AuditID:audit.AuditID,AssignID:a.AssignID}); const follow={TanggapanAuditi:value('TanggapanAuditi'),RencanaPerbaikan:value('RencanaPerbaikan'),JadwalPerbaikan:value('JadwalPerbaikan'),PJPerbaikan:value('PJPerbaikan'),RencanaPencegahan:value('RencanaPencegahan'),JadwalPencegahan:value('JadwalPencegahan'),PJPencegahan:value('PJPencegahan'),UpdatedAt:now,UpdatedBy:user.Nama}; if(old) return {mode:await upsert(client,schema,'FINDINGS',['AuditID','AssignID'],Object.assign({},old,follow)),assignId:a.AssignID}; const self=(data.SELF_EVAL||[]).find(x=>x.AssignID===a.AssignID)||{}, existingFollow=(data.SELF_FOLLOW_UP||[]).find(x=>x.AssignID===a.AssignID)||{}; return {mode:await upsert(client,schema,'SELF_FOLLOW_UP',['AuditID','AssignID'],Object.assign({FollowUpID:existingFollow.FollowUpID||id('SFU'),AuditID:audit.AuditID,AssignID:a.AssignID,StandardID:a.StandardID,SelfEvalID:existingFollow.SelfEvalID||self.SelfEvalID||'',CapaianAwal:existingFollow.CapaianAwal||value('Kategori'),Status:existingFollow.Status||'DRAFT',SavedAt:existingFollow.SavedAt||now,SavedBy:existingFollow.SavedBy||user.Nama},follow)),assignId:a.AssignID}; }
+  return {mode:'skipped'};
+}
+function cancelImportXlsx(user, importToken) { const job=jobs.get(importToken); if(job && job.userId===user.UserID) jobs.delete(importToken); return {ok:true}; }
+module.exports={MODULES,exportXlsxModule,validateImportXlsx,commitImportXlsx,cancelImportXlsx};

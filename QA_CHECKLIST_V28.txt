@@ -1,0 +1,12 @@
+QA V28
+[PASS] Auth.gs syntax
+[PASS] Index JavaScript syntax
+[PASS] Tidak ada duplicate function global
+[PASS] Seluruh frontend RPC memiliki backend function
+[PASS] Reset password individual tetap tersedia
+[PASS] Reset akun terpilih tersedia
+[PASS] Reset semua pengguna tersedia
+[PASS] Akun Admin BPM aktif dikecualikan dari reset massal
+[PASS] ForceChangePassword=true setelah reset
+[PASS] Invalidasi session target dilakukan secara batch
+[PASS] Tidak ada perubahan schema database

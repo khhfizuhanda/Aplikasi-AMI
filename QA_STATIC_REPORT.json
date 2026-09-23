@@ -1,0 +1,20 @@
+{
+  "package": "AMI_DEPLOY_FINAL_20260910_V27_FULL_PRODUCTION",
+  "backend_version": "1.6.1-production-ready-v27",
+  "ui_build": "AMI-UI-PRODUCTION-HARDENED-10SEP2026-V27",
+  "gs_syntax": "PASS",
+  "index_syntax": "PASS",
+  "duplicate_functions": 0,
+  "duplicate_top_level_vars": 0,
+  "server_function_count": 419,
+  "frontend_rpc_count": 65,
+  "missing_frontend_rpc": [],
+  "onclick_handler_count": 53,
+  "missing_client_handlers": [],
+  "duplicate_dom_ids": 0,
+  "reset_all_feature": "PASS",
+  "reset_retained_guard": "PASS",
+  "manifest_json": "PASS",
+  "reset_confirmation": "RESET SEMUA DATA UJI AMI 2026",
+  "source_file_count": 16
+}

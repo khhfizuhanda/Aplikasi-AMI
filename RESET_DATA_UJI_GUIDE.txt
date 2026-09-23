@@ -1,0 +1,19 @@
+PANDUAN RESET DATA UJI KESELURUHAN — AMI V27
+
+1. Login sebagai ADMIN_BPM.
+2. Buka menu Pusat Validasi.
+3. Klik Reset Semua Data Uji.
+4. Periksa preview: jumlah Audit, Evaluasi Diri, Desk, Bukti, Temuan, total baris, dan file Drive.
+5. Pastikan seluruh transaksi tersebut benar-benar data uji.
+6. Ketik persis: RESET SEMUA DATA UJI AMI 2026
+7. Klik Reset Semua Data Uji.
+8. Tunggu sampai notifikasi sukses muncul.
+9. Jalankan kembali Jalankan Uji Mendalam.
+10. Buka Monitoring Audit / Dashboard dan pastikan transaksi audit sudah kosong.
+
+AMAN DIPERTAHANKAN:
+Master Standar, Master Prodi/Unit, Master Auditor, Master Pimpinan, USERS/password,
+Siklus AMI, Settings, Source Register, Sessions, dan struktur database.
+
+PERHATIAN:
+Reset tidak memiliki Undo di aplikasi. File bukti/laporan tercatat akan dipindahkan ke Trash Google Drive bila dapat diakses.

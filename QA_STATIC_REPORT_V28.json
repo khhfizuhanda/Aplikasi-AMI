@@ -1,0 +1,14 @@
+{
+  "backend_version": "1.6.2-user-password-bulk-v28",
+  "ui_build": "AMI-UI-USER-PASSWORD-BULK-10SEP2026-V28",
+  "gs_files": 14,
+  "top_level_function_count": 401,
+  "duplicate_top_level_functions": {},
+  "frontend_rpc_count": 66,
+  "missing_frontend_rpc": [],
+  "bulk_reset_backend": true,
+  "bulk_reset_selected_ui": true,
+  "bulk_reset_all_ui": true,
+  "current_admin_excluded_backend": true,
+  "ok": true
+}

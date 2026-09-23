@@ -1,0 +1,31 @@
+QA CHECKLIST — AMI V27 FULL PRODUCTION
+
+STATIC QA — PASS
+[PASS] 14 file .gs lolos node --check
+[PASS] Index.html JavaScript lolos node --check setelah template GAS dinetralisasi
+[PASS] 419 fungsi server terdeteksi
+[PASS] 0 duplicate server function
+[PASS] 42 top-level variable terdeteksi
+[PASS] 0 duplicate top-level variable
+[PASS] 65 frontend RPC statis terdeteksi
+[PASS] 0 frontend RPC hilang di backend
+[PASS] 53 onclick handler terdeteksi
+[PASS] 0 onclick handler hilang
+[PASS] 0 duplicate DOM id pada HTML statis
+[PASS] Reset keseluruhan hanya menarget 16 sheet transaksi
+[PASS] Guard reset memastikan SETTINGS/MASTER/USERS/SESSIONS/AMI_CYCLE tidak menjadi target hapus
+[PASS] appsscript.json valid JSON
+
+SMOKE TEST WAJIB SETELAH DEPLOY
+[ ] Login ADMIN_BPM
+[ ] Selaraskan Skema Final
+[ ] Jalankan Uji Mendalam dan cek hijau/OK
+[ ] Login Auditi dan simpan Evaluasi Diri + bukti
+[ ] Kirim Evaluasi Diri
+[ ] Login Auditor/Lead, Desk Evaluation, Visitasi, Program Kerja, Catatan Audit
+[ ] Isi Hasil Audit & Aksi
+[ ] Approval Auditi/Pimpinan -> Lead -> BPM
+[ ] Generate Preview + laporan final Word/PDF
+[ ] Uji multi-tab/reload session
+[ ] Uji 10-30 login hampir bersamaan pada runtime Google Apps Script
+[ ] Bila seluruh data transaksi adalah data uji, jalankan Reset Semua Data Uji dan cek preview terlebih dahulu
