@@ -1,0 +1,4 @@
+project_id = "iabubetffbzsjestjqxp"
+
+[functions.ami-api]
+verify_jwt = false

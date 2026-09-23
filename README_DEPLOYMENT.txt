@@ -94,15 +94,12 @@ CATATAN PERFORMANCE
 - Workspace menggunakan snapshot standar dan hanya membaca seluruh MASTER_STANDAR bila diperlukan.
 - Dashboard publik memakai cache singkat agar pembukaan serentak tidak membebani server berulang.
 
-DEPLOY NODE.JS KE RENDER + SUPABASE
+DEPLOY GITHUB PAGES + SUPABASE EDGE FUNCTIONS
 1. Buat project PostgreSQL Free di Supabase.
-2. Salin connection string PostgreSQL dari Supabase. Gunakan connection pooling URL bila tersedia.
-3. Buka Render dan pilih New > Blueprint.
-4. Hubungkan repository GitHub `khhfizuhanda/Aplikasi-AMI` pada branch `main`.
-5. Saat diminta, isi `DATABASE_URL` dengan connection string Supabase.
-6. Pastikan `PGSSL=true`; Render akan membaca `render.yaml`.
-7. Tunggu build dan deploy selesai. Schema PostgreSQL dijalankan otomatis sebelum server dimulai.
-8. Aktifkan GitHub Pages dari Settings > Pages > Deploy from a branch, pilih `main` dan folder `/docs`.
-9. Buka frontend di `https://khhfizuhanda.github.io/Aplikasi-AMI/`.
+2. Jalankan schema pada `postgres/schema.sql` melalui SQL Editor Supabase.
+3. Aktifkan Edge Function `ami-api` dari folder `supabase/functions/ami-api`.
+4. Set secret `SUPABASE_SERVICE_ROLE_KEY` pada Supabase Edge Functions.
+5. Aktifkan GitHub Pages dari Settings > Pages > Deploy from a branch, pilih `main` dan folder `/docs`.
+6. Buka frontend di `https://khhfizuhanda.github.io/Aplikasi-AMI/`.
 
-Backend Render tersedia di `https://aplikasi-ami.onrender.com`; health check tersedia di `/api/health`.
+Endpoint backend: `https://iabubetffbzsjestjqxp.supabase.co/functions/v1/ami-api`.

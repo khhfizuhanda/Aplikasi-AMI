@@ -781,7 +781,7 @@ function selectField(id,label,options,value){
     return h;
 }
 function localRequest_(url, payload, timeoutMs) {
-    if (window.AMI_RENDER_BACKEND && url.charAt(0) === '/') url = window.AMI_API_BASE + url;
+    if (window.AMI_EDGE_BACKEND && url.charAt(0) === '/') url = window.AMI_API_BASE + url.replace(/^\/api/, '');
     var controller = new AbortController();
     var timer = setTimeout(function() { controller.abort(); }, timeoutMs || 35000);
     return fetch(url, {
@@ -805,7 +805,7 @@ function gas(name) {
     for (var _i = 1; _i < arguments.length; _i++) {
         args[_i - 1] = arguments[_i];
     }
-    if (window.AMI_LOCAL_BACKEND || window.AMI_RENDER_BACKEND) return localRequest_('/api/rpc/' + encodeURIComponent(name), {args:args});
+    if (window.AMI_LOCAL_BACKEND || window.AMI_EDGE_BACKEND) return localRequest_('/api/rpc/' + encodeURIComponent(name), {args:args});
     return new Promise(function (resolve, reject) {
         try {
             var runner = google.script.run
@@ -955,7 +955,7 @@ function parseResumeHash_(hash) {
 }
 
 function getAppRouteFromUrl_() {
-    if (window.AMI_LOCAL_BACKEND || window.AMI_RENDER_BACKEND) return Promise.resolve(parseAppHash_(location.hash));
+    if (window.AMI_LOCAL_BACKEND || window.AMI_EDGE_BACKEND) return Promise.resolve(parseAppHash_(location.hash));
     return new Promise(function(resolve) {
         try {
             if (!google || !google.script || !google.script.url || typeof google.script.url.getLocation !== 'function') {
@@ -1004,7 +1004,7 @@ function currentAppRoute_() {
 }
 
 function replaceAppUrl_(route, authenticated) {
-    if (window.AMI_LOCAL_BACKEND || window.AMI_RENDER_BACKEND) {
+    if (window.AMI_LOCAL_BACKEND || window.AMI_EDGE_BACKEND) {
         history.replaceState({}, '', location.pathname + (authenticated ? '?view=login' : '') + '#' + buildAppHash_(route || {}));
         return;
     }
@@ -1326,7 +1326,7 @@ function gasRead_(name) {
 function directLogin_(username, password, timeoutMs, requestId) {
     if (timeoutMs === void 0) { timeoutMs = 35000; }
     requestId=requestId||v26RequestId_();
-    if (window.AMI_LOCAL_BACKEND || window.AMI_RENDER_BACKEND) {
+    if (window.AMI_LOCAL_BACKEND || window.AMI_EDGE_BACKEND) {
         return localRequest_('/api/auth/login', {username:username,password:password}, timeoutMs);
     }
     if (typeof google === 'undefined' || !google.script || !google.script.run) {
