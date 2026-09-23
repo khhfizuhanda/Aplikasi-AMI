@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
 
 const supabase = createClient(
   Deno.env.get('SUPABASE_URL') ?? 'https://iabubetffbzsjestjqxp.supabase.co',
@@ -42,6 +43,17 @@ const masterTables: Record<string, string> = {
   UNIT: 'MASTER_UNIT',
   AUDITOR: 'MASTER_AUDITOR',
   PIMPINAN: 'MASTER_PIMPINAN',
+};
+
+const importModules: Record<string, {label: string; context: string; admin?: boolean; exportOnly?: boolean; table?: string}> = {
+  MASTER_PRODI: {label: 'Master Prodi', context: 'NONE', admin: true, table: 'MASTER_PRODI'},
+  MASTER_UNIT: {label: 'Master Unit/Biro', context: 'NONE', admin: true, table: 'MASTER_UNIT'},
+  MASTER_AUDITOR: {label: 'Master Auditor', context: 'NONE', admin: true, table: 'MASTER_AUDITOR'},
+  MASTER_PIMPINAN: {label: 'Master Pimpinan', context: 'NONE', admin: true, table: 'MASTER_PIMPINAN'},
+  MASTER_STANDAR: {label: 'Master Standar', context: 'NONE', admin: true, table: 'MASTER_STANDAR'},
+  SIKLUS: {label: 'Siklus AMI', context: 'NONE', admin: true, table: 'AMI_CYCLE'},
+  AUDIT_LOG: {label: 'Audit Log', context: 'NONE', admin: true, exportOnly: true, table: 'AUDIT_LOG'},
+  ERROR_LOG: {label: 'Error Log', context: 'NONE', admin: true, exportOnly: true, table: 'SYSTEM_ERROR_LOG'},
 };
 
 const clean = (value: unknown) => String(value ?? '').trim();
@@ -233,7 +245,15 @@ async function readRpc(name: string, args: unknown[], user: Record<string, unkno
       bootstrapOk: true,
     });
   }
-  if (name === 'getImportExportCatalog') return response([]);
+  if (name === 'getImportExportCatalog') {
+    const isAdmin = clean(user.Role).toUpperCase() === 'ADMIN_BPM';
+    const modules = Object.entries(importModules)
+      .filter(([, module]) => !module.admin || isAdmin)
+      .map(([key, module]) => ({key, label: module.label, context: module.context, canImport: false, canExport: true, exportOnly: !!module.exportOnly}));
+    const audits = await tableRows('AMI_AUDITI');
+    const cycles = isAdmin ? await tableRows('AMI_CYCLE') : [];
+    return response({modules, audits: audits.map(audit => ({...audit, label: `${audit.AuditiName || audit.AuditID} - ${audit.Status || ''}`})), cycles: cycles.map(cycle => ({...cycle, label: `${cycle.NamaSiklus || cycle.CycleID} - ${cycle.Status || ''}`})), role: user.Role});
+  }
   const adminOnly = ['listMaster', 'listStandardsAdmin', 'listStandards', 'getStandardVersions', 'listUsers', 'listCycles', 'listCycleAudits'];
   if (adminOnly.includes(name)) {
     const denied = requireAdmin(user);
@@ -268,6 +288,22 @@ async function readRpc(name: string, args: unknown[], user: Record<string, unkno
     return response(audits.filter(row => user.Role === 'AUDITI' && clean(row.AuditiType) === clean(user.RefType) && clean(row.AuditiID) === clean(user.RefID)));
   }
   return null;
+}
+
+async function exportXlsxModule(moduleKey: string, args: unknown[], user: Record<string, unknown>) {
+  const module = importModules[moduleKey];
+  if (!module) return response({error: 'Modul Import/Export tidak dikenali.'}, 400);
+  if (module.admin && clean(user.Role).toUpperCase() !== 'ADMIN_BPM') return response({error: 'Hanya Admin BPM yang dapat mengekspor modul ini.'}, 403);
+  const rows = module.table ? await tableRows(module.table) : [];
+  const headers = rows.length ? Object.keys(rows[0]) : ['Status'];
+  const matrix = [headers, ...rows.map(row => headers.map(header => row[header] ?? ''))];
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(matrix), 'DATA');
+  return response({
+    fileName: `AMI_${moduleKey}_${new Date().toISOString().slice(0, 10)}.xlsx`,
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    base64: XLSX.write(workbook, {type: 'base64', bookType: 'xlsx'}),
+  });
 }
 
 async function getSession(token: string, column = 'Token') {
@@ -328,6 +364,7 @@ Deno.serve(async request => {
     if (!session) return response({ error: 'Sesi sudah berakhir. Silakan login kembali.' }, 401);
     const readResult = await readRpc(rpcMatch[1], args, session.user);
     if (readResult) return readResult;
+    if (rpcMatch[1] === 'exportXlsxModule') return exportXlsxModule(clean(args[1]), args, session.user);
     if (rpcMatch[1] === 'resumeSession') return response({ ok: true, token: session.session.Token, resumeKey: session.session.ResumeKey, user: publicUser(session.user) });
     if (rpcMatch[1] === 'createResumeKey') return response({ ok: true, resumeKey: session.session.ResumeKey });
     if (rpcMatch[1] === 'logout') {
