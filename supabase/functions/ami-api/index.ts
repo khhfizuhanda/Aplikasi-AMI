@@ -126,6 +126,53 @@ async function writeRpc(name: string, args: unknown[], user: Record<string, unkn
     await saveRow(table, [key], input);
     return response({ok: true, id: input[key]});
   }
+  if (name === 'bulkImportMaster') {
+    const type = clean(args[1]).toUpperCase();
+    const table = masterTables[type];
+    if (!table) return response({error: 'Jenis master tidak dikenali.'}, 400);
+    const lines = String(args[2] || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const keys: Record<string, string> = {PRODI: 'ProdiID', UNIT: 'UnitID', AUDITOR: 'AuditorID', PIMPINAN: 'PimpinanID'};
+    const key = keys[type];
+    let inserted = 0;
+    let updated = 0;
+    let skipped = 0;
+    const errors: string[] = [];
+    const current = await tableRows(table);
+    const normalized = (value: unknown) => clean(value).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    for (const [index, line] of lines.entries()) {
+      const columns = line.split('\t').map(clean);
+      try {
+        let record: Record<string, unknown>;
+        let existing: Record<string, unknown> | undefined;
+        if (type === 'PRODI') {
+          if (!columns[1]) throw new Error('Nama Prodi wajib diisi.');
+          record = {KodeProdi: columns[0], NamaProdi: columns[1], Fakultas: columns[2], Jenjang: columns[3], Kaprodi: columns[4], NIDN: columns[5]};
+          existing = current.find(row => normalized(row.KodeProdi) === normalized(record.KodeProdi) || normalized(row.NamaProdi) === normalized(record.NamaProdi));
+        } else if (type === 'UNIT') {
+          if (!columns[1]) throw new Error('Nama Unit wajib diisi.');
+          record = {KodeUnit: columns[0], NamaUnit: columns[1], JenisUnit: columns[2], Pimpinan: columns[3]};
+          existing = current.find(row => normalized(row.KodeUnit) === normalized(record.KodeUnit) || normalized(row.NamaUnit) === normalized(record.NamaUnit));
+        } else if (type === 'AUDITOR') {
+          if (!columns[1]) throw new Error('Nama Auditor wajib diisi.');
+          record = {NIDN_NIK: columns[0], Nama: columns[1], Unit: columns[2], Sertifikasi: columns[3]};
+          existing = current.find(row => (columns[0] && normalized(row.NIDN_NIK) === normalized(columns[0])) || (normalized(row.Nama) === normalized(columns[1]) && normalized(row.Unit) === normalized(columns[2])));
+        } else {
+          if (!columns[0]) throw new Error('Nama Pimpinan wajib diisi.');
+          record = {Nama: columns[0], Jabatan: columns[1], Level: columns[2], AccessID: columns[3], AccessName: columns[3], AccessType: columns[2], UnitID: ''};
+          existing = current.find(row => normalized(row.Nama) === normalized(columns[0]) && normalized(row.Jabatan) === normalized(columns[1]));
+        }
+        const id = existing?.[key] || makeId(type === 'AUDITOR' ? 'AUD' : type);
+        const saved = {...record, [key]: id, Active: 'true', UpdatedAt: stamp(), CreatedAt: existing?.CreatedAt || stamp()};
+        await saveRow(table, [key], saved);
+        if (existing) updated++;
+        else { inserted++; current.push(saved); }
+      } catch (error) {
+        skipped++;
+        if (errors.length < 20) errors.push(`Baris ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return response({inserted, updated, skipped, errors});
+  }
   if (name === 'saveStandard') {
     const input = {...((args[1] || {}) as Record<string, unknown>)};
     input.StandardID = clean(input.StandardID) || makeId('STD');
@@ -364,6 +411,8 @@ Deno.serve(async request => {
     if (!session) return response({ error: 'Sesi sudah berakhir. Silakan login kembali.' }, 401);
     const readResult = await readRpc(rpcMatch[1], args, session.user);
     if (readResult) return readResult;
+    const writeResult = await writeRpc(rpcMatch[1], args, session.user);
+    if (writeResult) return writeResult;
     if (rpcMatch[1] === 'exportXlsxModule') return exportXlsxModule(clean(args[1]), args, session.user);
     if (rpcMatch[1] === 'resumeSession') return response({ ok: true, token: session.session.Token, resumeKey: session.session.ResumeKey, user: publicUser(session.user) });
     if (rpcMatch[1] === 'createResumeKey') return response({ ok: true, resumeKey: session.session.ResumeKey });
